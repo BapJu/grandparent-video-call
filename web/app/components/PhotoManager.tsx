@@ -11,10 +11,20 @@ const JPEG_QUALITY = 0.82;
 
 type Photo = { name: string; url: string };
 
+/** iPhone photos are HEIC, which only Safari can decode natively. Convert them
+ *  first so they work from any browser — the libheif/WASM bundle is imported
+ *  lazily, so anyone uploading ordinary JPEGs never downloads it. */
+async function toDecodable(file: File): Promise<Blob> {
+  const { isHeic, heicTo } = await import("heic-to");
+  if (!(await isHeic(file))) return file;
+  return heicTo({ blob: file, type: "image/jpeg", quality: JPEG_QUALITY });
+}
+
 /** Downscale to a sane size before upload: a 4 MB phone photo becomes ~300 KB,
  *  which the Pi then downloads once over 4G. */
 async function shrink(file: File): Promise<Blob> {
-  const bitmap = await createImageBitmap(file);
+  const source = await toDecodable(file);
+  const bitmap = await createImageBitmap(source);
   const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
@@ -101,6 +111,10 @@ export default function PhotoManager() {
     for (const [i, file] of files.entries()) {
       setProgress(`Envoi ${i + 1}/${files.length}…`);
       try {
+        // HEIC conversion is the slow step, so say so rather than looking stuck.
+        if (/\.hei[cf]$/i.test(file.name)) {
+          setProgress(`Conversion ${i + 1}/${files.length}…`);
+        }
         const blob = await shrink(file);
         const { error } = await supabase.storage
           .from(BUCKET)
@@ -109,14 +123,13 @@ export default function PhotoManager() {
           });
         if (error) throw error;
       } catch {
-        // HEIC (iPhone) can't be decoded by canvas outside Safari.
         failed++;
       }
     }
 
     if (failed > 0) {
       setError(
-        `${failed} photo(s) n'ont pas pu être envoyées. Les photos iPhone (HEIC) ne fonctionnent que depuis Safari — sinon, exporte-les en JPEG.`
+        `${failed} photo(s) n'ont pas pu être envoyées. Vérifie qu'il s'agit bien d'images.`
       );
     }
 
@@ -157,7 +170,7 @@ export default function PhotoManager() {
         <input
           ref={fileRef}
           type="file"
-          accept="image/*"
+          accept="image/*,.heic,.heif"
           multiple
           disabled={busy}
           onChange={onUpload}

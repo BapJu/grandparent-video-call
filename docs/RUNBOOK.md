@@ -139,3 +139,11 @@ ls ~/visio-tv/photos/                                  # local cache
 pgrep -af imv-wayland                                  # slideshow running?
 journalctl -n 20 _SYSTEMD_USER_UNIT=visio-tv-listener.service | grep -i photo
 ```
+
+### iPhone photos (HEIC)
+
+iPhones shoot HEIC, which only Safari decodes natively — `createImageBitmap` would fail everywhere else. The upload path therefore runs files through [`heic-to`](https://www.npmjs.com/package/heic-to) (libheif compiled to WebAssembly) before resizing. The bundle is imported lazily, so it is only downloaded when someone actually picks a HEIC file: the `/photos` route grew by just 70 bytes.
+
+Converting server-side was rejected: Supabase Image Transformations require the **Pro plan** (paid) and don't document HEIC as an input format.
+
+Verified with an official [Nokia HEIF conformance file](https://github.com/nokiatech/heif_conformance): 219 KB HEIC → 142 KB JPEG, uploaded and synced to the Pi.
