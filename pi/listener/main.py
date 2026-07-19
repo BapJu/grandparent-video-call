@@ -24,6 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from realtime import AsyncRealtimeClient, RealtimeSubscribeStates
 
+import jitsi_probe
 import kiosk
 import supa_auth
 
@@ -53,8 +54,11 @@ KIOSK_URL = os.environ.get("KIOSK_URL", "").strip()
 # Auto-unmute: meet.jit.si makes participants who arrive before the moderator
 # join muted, and Jitsi never lets a moderator unmute someone remotely.
 AUTO_UNMUTE = os.environ.get("AUTO_UNMUTE", "true").lower() not in ("0", "false", "no")
-AUTO_UNMUTE_INTERVAL = float(os.environ.get("AUTO_UNMUTE_INTERVAL", "5"))
+CALL_MONITOR_INTERVAL = float(os.environ.get("CALL_MONITOR_INTERVAL", "5"))
 AUTO_UNMUTE_GIVE_UP_AFTER = float(os.environ.get("AUTO_UNMUTE_GIVE_UP_AFTER", "900"))
+# Hang up this long after the last remote participant leaves, so the Pi never
+# sits alone in a room with its camera and mic live.
+HANGUP_WHEN_ALONE_AFTER = float(os.environ.get("HANGUP_WHEN_ALONE_AFTER", "60"))
 # How often to check that the kiosk is still alive during a call.
 KIOSK_WATCH_INTERVAL = float(os.environ.get("KIOSK_WATCH_INTERVAL", "5"))
 
@@ -106,40 +110,69 @@ async def publish_presence() -> None:
         logger.exception("Failed to publish presence")
 
 
-async def _auto_unmute(room: str) -> None:
-    """Turn the Pi's camera and microphone back on once the call really starts.
+async def _monitor_call(room: str) -> None:
+    """Watch a live call: unmute the Pi, and hang up once it is left alone.
 
-    meet.jit.si forces participants arriving before the moderator to join
-    muted, and its keyboard shortcuts are inert until the conference actually
-    starts — so blind toggles are unreliable. Instead, toggle video ('v') and
-    watch whether the camera device actually opens: that single signal proves
-    both that video is now on and that shortcuts are being honoured, at which
-    point one 'm' unmutes the microphone (which joined muted too).
+    Reads the truth straight out of the Jitsi page (via Firefox's Marionette
+    port) rather than guessing:
 
-    Because a keystroke is only ever sent while the camera is still closed,
-    this can never toggle video back off.
+    * Hang up — the participant count comes from the page, so if everyone
+      leaves (or the host closes their tab instead of pressing Raccrocher) the
+      Pi doesn't sit in the room alone with camera and mic live, burning 4G.
+      The countdown only starts once somebody has actually been seen in the
+      room, so a host who takes a while to join is never cut off.
+    * Unmute — deliberately *not* driven by the page's mute flags: while
+      waiting for a moderator Jitsi reports audio/video as unmuted even though
+      the UI shows them off and the camera is closed. The camera device
+      actually opening is the only trustworthy signal, so unmuting keeps using
+      the keystroke-plus-camera-feedback approach.
     """
-    deadline = asyncio.get_running_loop().time() + AUTO_UNMUTE_GIVE_UP_AFTER
+    loop = asyncio.get_running_loop()
+    give_up_at = loop.time() + AUTO_UNMUTE_GIVE_UP_AFTER
+    unmuted = False
+    seen_remote = False
+    alone_since: float | None = None
     logged_waiting = False
 
-    while asyncio.get_running_loop().time() < deadline:
+    while True:
         if state.room != room or state.process is None:
             return  # call ended or replaced
 
-        if await asyncio.to_thread(kiosk.camera_in_use):
-            await asyncio.to_thread(kiosk.send_key, "m")
-            logger.info("Auto-unmute: camera live, microphone unmuted (room=%s)", room)
-            asyncio.create_task(publish_presence())
-            return
+        # --- unmute: camera opening is the only trustworthy signal ---------
+        if not unmuted and loop.time() < give_up_at:
+            if await asyncio.to_thread(kiosk.camera_in_use):
+                await asyncio.to_thread(kiosk.send_key, "m")
+                unmuted = True
+                logger.info("Camera live, microphone unmuted (room=%s)", room)
+                asyncio.create_task(publish_presence())
+            else:
+                if not logged_waiting:
+                    logger.info("Waiting for the conference to start (room=%s)", room)
+                    logged_waiting = True
+                await asyncio.to_thread(kiosk.send_key, "v")
 
-        if not logged_waiting:
-            logger.info("Auto-unmute: waiting for the conference to start (room=%s)", room)
-            logged_waiting = True
+        # --- hang up once the room empties --------------------------------
+        probe = await asyncio.to_thread(jitsi_probe.get_state)
+        if probe is not None:
+            remote = probe["remote"]
+            if remote > 0:
+                if not seen_remote:
+                    logger.info("Someone joined the call (%s remote, room=%s)", remote, room)
+                seen_remote = True
+                alone_since = None
+            elif seen_remote:
+                if alone_since is None:
+                    alone_since = loop.time()
+                    logger.info(
+                        "Everyone left, hanging up in %ss unless someone comes back",
+                        HANGUP_WHEN_ALONE_AFTER,
+                    )
+                elif loop.time() - alone_since >= HANGUP_WHEN_ALONE_AFTER:
+                    logger.info("Call empty for %ss — hanging up (room=%s)", HANGUP_WHEN_ALONE_AFTER, room)
+                    _end_call()
+                    return
 
-        await asyncio.to_thread(kiosk.send_key, "v")
-        await asyncio.sleep(AUTO_UNMUTE_INTERVAL)
-
-    logger.warning("Auto-unmute: gave up after %ss (room=%s)", AUTO_UNMUTE_GIVE_UP_AFTER, room)
+        await asyncio.sleep(CALL_MONITOR_INTERVAL)
 
 
 async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
@@ -229,7 +262,7 @@ def _start_call(room: str) -> None:
     )
     _cancel_unmute()
     if AUTO_UNMUTE:
-        state.unmute_task = asyncio.create_task(_auto_unmute(room))
+        state.unmute_task = asyncio.create_task(_monitor_call(room))
     _cancel_watch()
     state.watch_task = asyncio.create_task(_watch_kiosk(room, state.process))
     asyncio.create_task(publish_presence())

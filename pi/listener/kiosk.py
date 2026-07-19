@@ -66,6 +66,10 @@ def launch(
     cmd = [
         firefox_bin,
         "--kiosk",
+        # Firefox's automation port, used by jitsi_probe to read the real call
+        # state (participant count, mute state) out of the Jitsi page. Bound to
+        # localhost only.
+        "--marionette",
         "--profile",
         profile_dir,
         url,
