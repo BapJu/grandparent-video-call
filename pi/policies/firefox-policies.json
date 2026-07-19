@@ -2,11 +2,11 @@
   "policies": {
     "Permissions": {
       "Camera": {
-        "Allow": ["https://meet.jit.si"],
+        "Allow": ["https://meet.jit.si", "https://tv-visio.vercel.app"],
         "BlockNewRequests": false
       },
       "Microphone": {
-        "Allow": ["https://meet.jit.si"],
+        "Allow": ["https://meet.jit.si", "https://tv-visio.vercel.app"],
         "BlockNewRequests": false
       }
     },

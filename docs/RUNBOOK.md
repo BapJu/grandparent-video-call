@@ -32,6 +32,18 @@ Steps:
 
 The kiosk uses **Firefox** (`--kiosk --profile ~/.config/visio-tv-ff`). Chromium is unusable on this Pi: its camera capture hangs forever on the missing xdg-desktop-portal Camera backend (full story in [CAMERA-ISSUE.md](CAMERA-ISSUE.md)). The critical pref is `media.webrtc.camera.allow-pipewire=false` in [pi/firefox/user.js](../pi/firefox/user.js); camera/mic are allowlisted for meet.jit.si via `/etc/firefox/policies/policies.json` (installed from `pi/policies/firefox-policies.json`, needs sudo once).
 
+## Why the /kiosk wrapper is disabled (KIOSK_URL empty)
+
+The web app has a `/kiosk` page that embeds Jitsi via the IFrame API, which lets the Pi unmute *itself* on join (Jitsi never lets a moderator unmute a remote participant) and accept `set_media` commands from the app. It works — verified: the Pi joined with mic and camera already live, and remote mute worked.
+
+**But meet.jit.si disconnects embedded calls after 5 minutes**: *"Embedding meet.jit.si is only meant for demo purposes, so this call will disconnect in 5 minutes."* That makes it unusable here, so `KIOSK_URL` is left empty and the Pi loads meet.jit.si directly (unlimited call length, but it joins muted).
+
+The wrapper code is kept because it becomes usable as-is with either:
+- **JaaS** (8x8 Jitsi as a Service) — free up to 25 monthly active users, no embedding limit, and its JWTs also remove the moderator-login requirement. Needs a JaaS account plus a JWT-issuing API route.
+- **A self-hosted Jitsi** — no limits at all.
+
+To re-enable, set `KIOSK_URL=https://tv-visio.vercel.app/kiosk` in the Pi's `.env` and restart the service.
+
 ## Known quirk: the Pi joins muted (manual unmute for now)
 
 meet.jit.si forces participants who arrive before the moderator to join with camera/mic off, regardless of URL `startWith*Muted=false` params. Until this is automated in the listener, unmute remotely over SSH once the call is live (Jitsi shortcuts: `v` = camera, `m` = mic — they are **toggles**, so only send them when the state is known):
