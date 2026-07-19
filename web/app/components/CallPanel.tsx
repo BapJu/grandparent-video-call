@@ -22,6 +22,11 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
   const [room, setRoom] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Actual mic/camera state reported by the Pi's kiosk page (null = unknown).
+  const [media, setMedia] = useState<{
+    audioMuted: boolean;
+    videoMuted: boolean;
+  } | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
   useEffect(() => {
@@ -61,6 +66,15 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
         .on("presence", { event: "sync" }, syncPi)
         .on("presence", { event: "join" }, syncPi)
         .on("presence", { event: "leave" }, syncPi)
+        .on("broadcast", { event: "media_state" }, ({ payload }) => {
+          const p = payload as { audio_muted?: boolean; video_muted?: boolean };
+          if (
+            typeof p.audio_muted === "boolean" &&
+            typeof p.video_muted === "boolean"
+          ) {
+            setMedia({ audioMuted: p.audio_muted, videoMuted: p.video_muted });
+          }
+        })
         .subscribe((status, err) => {
           if (cancelled) return;
           if (status === "SUBSCRIBED") {
@@ -101,13 +115,30 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     const newRoom = `visio-tv-${crypto.randomUUID()}`;
     // Optimistic: presence from the Pi confirms it a moment later.
     setRoom(newRoom);
+    setMedia(null);
     await send("start_call", { room: newRoom });
   }, [send]);
 
   const endCall = useCallback(async () => {
     setRoom(null);
+    setMedia(null);
     await send("end_call", {});
   }, [send]);
+
+  // Ask the Pi's kiosk page to mute/unmute itself. Jitsi forbids a moderator
+  // from unmuting a remote participant, so the Pi acts on its own behalf.
+  const setPiMedia = useCallback(
+    async (want: { audio?: boolean; video?: boolean }) => {
+      const channel = channelRef.current;
+      if (!channel) return;
+      await channel.send({
+        type: "broadcast",
+        event: "set_media",
+        payload: want,
+      });
+    },
+    []
+  );
 
   const badge = {
     connecting: { text: "Connexion…", cls: "bg-slate-700 text-slate-300" },
@@ -157,6 +188,29 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
             <p className="text-center text-sm text-slate-400">
               Connecte-toi comme hôte dans Jitsi pour démarrer la salle.
             </p>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setPiMedia({ audio: !(media?.audioMuted ?? false) })}
+                disabled={!media}
+                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
+              >
+                {media?.audioMuted ? "🔇 Micro coupé" : "🎤 Micro actif"}
+              </button>
+              <button
+                onClick={() => setPiMedia({ video: !(media?.videoMuted ?? false) })}
+                disabled={!media}
+                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
+              >
+                {media?.videoMuted ? "🚫 Caméra coupée" : "📷 Caméra active"}
+              </button>
+            </div>
+            <p className="text-center text-xs text-slate-500">
+              {media
+                ? "Micro et caméra de Mamie (clique pour changer)"
+                : "En attente de la télé de Mamie…"}
+            </p>
+
             <button
               onClick={endCall}
               disabled={busy}

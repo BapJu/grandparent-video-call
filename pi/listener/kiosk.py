@@ -33,12 +33,36 @@ JITSI_CONFIG_HASH = (
 
 
 def build_jitsi_url(room: str) -> str:
+    """Plain meet.jit.si URL (fallback when no kiosk wrapper is configured)."""
     safe_room = urllib.parse.quote(room, safe="")
     return f"{JITSI_BASE}/{safe_room}#{JITSI_CONFIG_HASH}"
 
 
-def launch(room: str, firefox_bin: str, profile_dir: str) -> subprocess.Popen:
-    url = build_jitsi_url(room)
+def build_kiosk_url(kiosk_base: str, room: str, access_token: str | None) -> str:
+    """URL of the web app's /kiosk wrapper, which embeds Jitsi via the IFrame
+    API so the Pi can unmute itself and accept remote mic/camera commands.
+
+    Room and token travel in the URL fragment, which browsers never send to the
+    server — so the token stays off Vercel's logs.
+    """
+    params = {"room": room}
+    if access_token:
+        params["token"] = access_token
+    return f"{kiosk_base.rstrip('/')}#{urllib.parse.urlencode(params)}"
+
+
+def launch(
+    room: str,
+    firefox_bin: str,
+    profile_dir: str,
+    kiosk_base: str | None = None,
+    access_token: str | None = None,
+) -> subprocess.Popen:
+    url = (
+        build_kiosk_url(kiosk_base, room, access_token)
+        if kiosk_base
+        else build_jitsi_url(room)
+    )
     cmd = [
         firefox_bin,
         "--kiosk",
@@ -48,7 +72,8 @@ def launch(room: str, firefox_bin: str, profile_dir: str) -> subprocess.Popen:
     ]
     env = os.environ.copy()
     env["MOZ_ENABLE_WAYLAND"] = "1"
-    logger.info("Launching kiosk room=%s cmd=%s", room, " ".join(cmd))
+    # Log without the URL: it can carry the access token.
+    logger.info("Launching kiosk room=%s via=%s", room, "wrapper" if kiosk_base else "meet.jit.si")
     # start_new_session=True puts firefox (and its child content processes) in
     # their own process group so we can kill the whole tree.
     return subprocess.Popen(

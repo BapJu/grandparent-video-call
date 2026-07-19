@@ -46,6 +46,10 @@ FIREFOX_BIN = os.environ.get("FIREFOX_BIN", "/usr/bin/firefox")
 FIREFOX_PROFILE_DIR = os.environ.get(
     "FIREFOX_PROFILE_DIR", "/home/julienne/.config/visio-tv-ff"
 )
+# URL of the web app's /kiosk wrapper (embeds Jitsi so the Pi can unmute
+# itself and accept remote mic/camera commands). Empty = load meet.jit.si
+# directly, in which case the Pi joins muted and can't be controlled remotely.
+KIOSK_URL = os.environ.get("KIOSK_URL", "").strip()
 
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -61,6 +65,9 @@ class CallState:
         self.timeout_task: asyncio.Task | None = None
         self.room: str | None = None
         self.channel = None
+        # Current Supabase access token, handed to the kiosk page so it can
+        # join the private channel and receive mic/camera commands.
+        self.access_token: str | None = None
 
 
 state = CallState()
@@ -114,7 +121,13 @@ def _start_call(room: str) -> None:
         )
         return
     kiosk.kill_stray_kiosk(FIREFOX_PROFILE_DIR)
-    state.process = kiosk.launch(room, FIREFOX_BIN, FIREFOX_PROFILE_DIR)
+    state.process = kiosk.launch(
+        room,
+        FIREFOX_BIN,
+        FIREFOX_PROFILE_DIR,
+        kiosk_base=KIOSK_URL or None,
+        access_token=state.access_token,
+    )
     state.room = room
     _cancel_timeout()
     state.timeout_task = asyncio.create_task(
@@ -166,6 +179,7 @@ async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) ->
                 SUPABASE_DEVICE_PASSWORD,
             )
             expires_in = int(auth.get("expires_in", 3600))
+            state.access_token = auth["access_token"]
             await client.set_auth(auth["access_token"])
             logger.info("Auth token refreshed (next in ~%ss)", min(2700, int(expires_in * 0.75)))
         except Exception:
@@ -182,6 +196,7 @@ async def run_once() -> None:
         SUPABASE_DEVICE_PASSWORD,
     )
     logger.info("Device login OK (%s)", SUPABASE_DEVICE_EMAIL)
+    state.access_token = auth["access_token"]
 
     client = AsyncRealtimeClient(REALTIME_URL, SUPABASE_ANON_KEY)
     await client.connect()
