@@ -27,6 +27,7 @@ from realtime import AsyncRealtimeClient, RealtimeSubscribeStates
 import jitsi_probe
 import kiosk
 import photos
+import ringtone
 import slideshow
 import supa_auth
 
@@ -78,6 +79,17 @@ SLIDESHOW_END = os.environ.get("SLIDESHOW_END", "21:00")
 # Safety net in case a photos_changed broadcast is ever missed.
 PHOTO_SYNC_INTERVAL = float(os.environ.get("PHOTO_SYNC_INTERVAL", "21600"))
 
+# --- Ringtone --------------------------------------------------------------
+# Rings when the caller actually joins, to bring her to the screen. Nobody
+# "answers" on this end, so it just gives up after a while like a phone would.
+RINGTONE_ENABLED = os.environ.get("RINGTONE_ENABLED", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+RINGTONE_FILE = os.environ.get("RINGTONE_FILE", "/home/julienne/visio-tv/ringtone.wav")
+RINGTONE_DURATION = float(os.environ.get("RINGTONE_DURATION", "45"))
+
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     + "/realtime/v1"
@@ -92,6 +104,7 @@ class CallState:
         self.timeout_task: asyncio.Task | None = None
         self.unmute_task: asyncio.Task | None = None
         self.watch_task: asyncio.Task | None = None
+        self.ring_task: asyncio.Task | None = None
         self.room: str | None = None
         self.channel = None
         # Current Supabase access token, handed to the kiosk page so it can
@@ -140,6 +153,9 @@ async def _monitor_call(room: str) -> None:
       Pi doesn't sit in the room alone with camera and mic live, burning 4G.
       The countdown only starts once somebody has actually been seen in the
       room, so a host who takes a while to join is never cut off.
+    * Ringtone — starts when the caller actually joins, and stops early if a
+      chat message appears (sending one from the Jitsi app is easier than
+      switching back to the family app mid-call).
     * Unmute — deliberately *not* driven by the page's mute flags: while
       waiting for a moderator Jitsi reports audio/video as unmuted even though
       the UI shows them off and the camera is closed. The camera device
@@ -152,6 +168,8 @@ async def _monitor_call(room: str) -> None:
     seen_remote = False
     alone_since: float | None = None
     logged_waiting = False
+    # Chat message count when the ringtone started; None when not ringing.
+    messages_at_ring_start: int | None = None
 
     while True:
         if state.room != room or state.process is None:
@@ -174,9 +192,30 @@ async def _monitor_call(room: str) -> None:
         probe = await asyncio.to_thread(jitsi_probe.get_state)
         if probe is not None:
             remote = probe["remote"]
+            # A chat message means the caller (or she) is clearly there, so stop
+            # ringing. Only messages sent *while* it rings count: the baseline is
+            # taken when the ringing starts.
+            if (
+                messages_at_ring_start is not None
+                and probe["messages"] > messages_at_ring_start
+                and state.ring_task is not None
+                and not state.ring_task.done()
+            ):
+                logger.info("Chat message received — stopping the ringtone")
+                _cancel_ring()
+                messages_at_ring_start = None
+
             if remote > 0:
                 if not seen_remote:
                     logger.info("Someone joined the call (%s remote, room=%s)", remote, room)
+                    # Only ring once the caller is really there, so she isn't
+                    # summoned to a screen that's still waiting.
+                    if RINGTONE_ENABLED:
+                        _cancel_ring()
+                        messages_at_ring_start = probe["messages"]
+                        state.ring_task = asyncio.create_task(
+                            ringtone.ring(RINGTONE_FILE, RINGTONE_DURATION)
+                        )
                 seen_remote = True
                 alone_since = None
             elif seen_remote:
@@ -310,6 +349,12 @@ async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
         return
 
 
+def _cancel_ring() -> None:
+    if state.ring_task is not None and not state.ring_task.done():
+        state.ring_task.cancel()
+    state.ring_task = None
+
+
 def _cancel_watch() -> None:
     if state.watch_task is not None and not state.watch_task.done():
         state.watch_task.cancel()
@@ -392,6 +437,7 @@ def _end_call() -> None:
     _cancel_timeout()
     _cancel_unmute()
     _cancel_watch()
+    _cancel_ring()
     try:
         asyncio.get_running_loop()
         asyncio.create_task(publish_presence())

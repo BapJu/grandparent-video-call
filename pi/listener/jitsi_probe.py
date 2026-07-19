@@ -38,6 +38,10 @@ try {
     : Object.keys(remote || {}).length;
   out.audioMuted = !!st['features/base/media'].audio.muted;
   out.videoMuted = st['features/base/media'].video.muted !== 0;
+  // Used to silence the ringtone: sending a chat message from the Jitsi app is
+  // far handier than switching back to the family app mid-call.
+  const chat = st['features/chat'];
+  out.messages = chat && chat.messages ? chat.messages.length : 0;
   out.ready = true;
 } catch (e) {
   out.error = String(e);
@@ -111,7 +115,8 @@ def _run(script: str):
 def get_state() -> dict | None:
     """Current call state, or None when the page isn't reachable/ready.
 
-    Returns {"remote": int, "audioMuted": bool, "videoMuted": bool}.
+    Returns {"remote": int, "audioMuted": bool, "videoMuted": bool,
+    "messages": int}.
     """
     try:
         result = _run(_STATE_SCRIPT)
