@@ -156,4 +156,4 @@ Tapping a plain `https://meet.jit.si/<room>` link on mobile lands on Jitsi's own
 - **iOS** — `org.jitsi.meet://meet.jit.si/<room>`. This fails *silently* when the app isn't installed, which is why an "Ouvrir dans le navigateur" link stays visible underneath on mobile.
 - **Desktop** — plain https link, no app link rendered.
 
-Worth checking on a real phone: whether the Jitsi mobile app lets you sign in as moderator (meet.jit.si won't start the room otherwise). If it doesn't, use the browser link — hence keeping it one tap away.
+Verified working on a real phone: the app opens straight into the room. If the mobile app ever refuses to sign you in as moderator (meet.jit.si won't start the room otherwise), fall back to the browser link kept one tap away.
