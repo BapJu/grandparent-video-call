@@ -14,6 +14,7 @@ type PiPresence = {
   device?: string;
   status?: "idle" | "in_call";
   room?: string | null;
+  since?: string;
 };
 
 export default function CallPanel({ userEmail }: { userEmail: string }) {
@@ -39,9 +40,13 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
 
       const syncPi = () => {
         const state = channel.presenceState<PiPresence>();
+        // Presence can briefly hold more than one entry for the Pi (a track()
+        // adds an entry rather than replacing it), so always take the newest.
         const pi = Object.values(state)
           .flat()
-          .find((m) => m.device === "pi");
+          .filter((m) => m.device === "pi")
+          .sort((a, b) => (a.since ?? "").localeCompare(b.since ?? ""))
+          .at(-1);
 
         if (!pi) {
           setPiStatus("offline");

@@ -67,6 +67,13 @@ state = CallState()
 
 
 async def publish_presence() -> None:
+    """Publish the Pi's current state.
+
+    Note: realtime-py's track() appends a presence entry instead of replacing
+    the previous one, and untrack() does not reliably clear it, so several
+    entries can live under the 'pi' key. Consumers must therefore use the most
+    recent one (highest 'since') — see web/app/components/CallPanel.tsx.
+    """
     channel = state.channel
     if channel is None:
         return
