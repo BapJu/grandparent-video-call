@@ -1,0 +1,6 @@
+# Appended to ~/.config/labwc/autostart by install.sh.
+# Hands the Wayland session's environment to the systemd --user manager
+# (which does not otherwise see WAYLAND_DISPLAY), then starts the listener,
+# whose child chromium process inherits this same environment.
+systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR DISPLAY XDG_SESSION_TYPE
+systemctl --user start visio-tv-listener.service

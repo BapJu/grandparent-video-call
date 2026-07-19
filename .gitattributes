@@ -1,0 +1,5 @@
+# Everything in this repo targets Linux (Pi) or web deploys — keep LF everywhere.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

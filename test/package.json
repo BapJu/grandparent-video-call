@@ -1,0 +1,14 @@
+{
+  "name": "visio-tv-trigger",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node trigger.mjs start",
+    "end": "node trigger.mjs end"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5"
+  }
+}

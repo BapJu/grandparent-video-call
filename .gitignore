@@ -1,0 +1,15 @@
+# secrets / local config
+pi/.env
+test/.env
+web/.env.local
+web/.env*.local
+
+# deps / build outputs
+pi/venv/
+node_modules/
+web/.next/
+web/out/
+
+# tooling
+.vercel
+.claude/settings.local.json

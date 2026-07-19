@@ -1,0 +1,18 @@
+{
+  "policies": {
+    "Permissions": {
+      "Camera": {
+        "Allow": ["https://meet.jit.si"],
+        "BlockNewRequests": false
+      },
+      "Microphone": {
+        "Allow": ["https://meet.jit.si"],
+        "BlockNewRequests": false
+      }
+    },
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "OverrideFirstRunPage": "",
+    "DontCheckDefaultBrowser": true
+  }
+}

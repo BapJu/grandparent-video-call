@@ -1,0 +1,17 @@
+[Unit]
+Description=Visio-TV Supabase Realtime call trigger listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/home/julienne/visio-tv/.env
+ExecStart=/home/julienne/visio-tv/venv/bin/python3 /home/julienne/visio-tv/listener/main.py
+WorkingDirectory=/home/julienne/visio-tv/listener
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
