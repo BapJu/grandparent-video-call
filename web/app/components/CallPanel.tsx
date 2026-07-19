@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import SignOutButton from "./SignOutButton";
@@ -227,6 +228,13 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           </p>
         )}
       </div>
+
+      <Link
+        href="/photos"
+        className="w-full max-w-sm rounded-xl border border-slate-700 px-4 py-3 text-center text-slate-300 transition hover:bg-slate-900"
+      >
+        🖼️ Photos de Mamie
+      </Link>
 
       <footer className="flex w-full max-w-sm items-center justify-between pb-2 text-sm text-slate-500">
         <span>{userEmail}</span>

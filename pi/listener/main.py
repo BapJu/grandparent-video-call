@@ -26,6 +26,8 @@ from realtime import AsyncRealtimeClient, RealtimeSubscribeStates
 
 import jitsi_probe
 import kiosk
+import photos
+import slideshow
 import supa_auth
 
 logging.basicConfig(
@@ -62,6 +64,20 @@ HANGUP_WHEN_ALONE_AFTER = float(os.environ.get("HANGUP_WHEN_ALONE_AFTER", "60"))
 # How often to check that the kiosk is still alive during a call.
 KIOSK_WATCH_INTERVAL = float(os.environ.get("KIOSK_WATCH_INTERVAL", "5"))
 
+# --- Photo frame -----------------------------------------------------------
+SLIDESHOW_ENABLED = os.environ.get("SLIDESHOW_ENABLED", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+PHOTOS_DIR = os.environ.get("PHOTOS_DIR", "/home/julienne/visio-tv/photos")
+SLIDESHOW_INTERVAL = float(os.environ.get("SLIDESHOW_INTERVAL", "8"))
+# Outside this window the video signal is cut so the screen goes to standby.
+SLIDESHOW_START = os.environ.get("SLIDESHOW_START", "09:00")
+SLIDESHOW_END = os.environ.get("SLIDESHOW_END", "21:00")
+# Safety net in case a photos_changed broadcast is ever missed.
+PHOTO_SYNC_INTERVAL = float(os.environ.get("PHOTO_SYNC_INTERVAL", "21600"))
+
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
     + "/realtime/v1"
@@ -81,6 +97,9 @@ class CallState:
         # Current Supabase access token, handed to the kiosk page so it can
         # join the private channel and receive mic/camera commands.
         self.access_token: str | None = None
+        # Photo frame
+        self.slideshow_proc: subprocess.Popen | None = None
+        self.photos_dirty = False  # a sync changed files: imv needs restarting
 
 
 state = CallState()
@@ -175,6 +194,94 @@ async def _monitor_call(room: str) -> None:
         await asyncio.sleep(CALL_MONITOR_INTERVAL)
 
 
+def _within_slideshow_window(now: datetime | None = None) -> bool:
+    """True when the current local time is inside the photo-frame window.
+
+    Handles windows that wrap past midnight (e.g. 21:00 → 09:00).
+    """
+    now = now or datetime.now()
+    try:
+        start_h, start_m = (int(x) for x in SLIDESHOW_START.split(":"))
+        end_h, end_m = (int(x) for x in SLIDESHOW_END.split(":"))
+    except ValueError:
+        logger.warning(
+            "Invalid SLIDESHOW_START/END (%r/%r) — keeping the frame on",
+            SLIDESHOW_START,
+            SLIDESHOW_END,
+        )
+        return True
+    minutes = now.hour * 60 + now.minute
+    start = start_h * 60 + start_m
+    end = end_h * 60 + end_m
+    if start == end:
+        return True
+    return start <= minutes < end if start < end else (minutes >= start or minutes < end)
+
+
+def _stop_slideshow() -> None:
+    if state.slideshow_proc is not None:
+        slideshow.stop(state.slideshow_proc)
+        state.slideshow_proc = None
+
+
+async def sync_photos() -> None:
+    """Refresh the local photo cache; flag the slideshow for restart if changed."""
+    if not SLIDESHOW_ENABLED or not state.access_token:
+        return
+    added, removed = await asyncio.to_thread(
+        photos.sync, SUPABASE_URL, SUPABASE_ANON_KEY, state.access_token, PHOTOS_DIR
+    )
+    if added or removed:
+        # imv freezes its file list at launch, so it must be restarted to pick
+        # up new or deleted photos.
+        state.photos_dirty = True
+
+
+async def _slideshow_loop() -> None:
+    """Run the photo frame whenever the Pi is idle and inside the time window.
+
+    A call always wins: the kiosk needs the screen to itself.
+    """
+    last_sync = 0.0
+    loop = asyncio.get_running_loop()
+
+    while True:
+        try:
+            if state.access_token and loop.time() - last_sync > PHOTO_SYNC_INTERVAL:
+                await sync_photos()
+                last_sync = loop.time()
+
+            in_call = state.process is not None
+            running = (
+                state.slideshow_proc is not None and state.slideshow_proc.poll() is None
+            )
+
+            if in_call:
+                # The call owns the screen.
+                if running:
+                    _stop_slideshow()
+                slideshow.display_on()
+            elif not _within_slideshow_window():
+                if running:
+                    _stop_slideshow()
+                slideshow.display_off()
+            elif await asyncio.to_thread(photos.count_local, PHOTOS_DIR) == 0:
+                if running:
+                    _stop_slideshow()
+            else:
+                if running and state.photos_dirty:
+                    _stop_slideshow()
+                    running = False
+                if not running:
+                    slideshow.display_on()
+                    state.slideshow_proc = slideshow.start(PHOTOS_DIR, SLIDESHOW_INTERVAL)
+                    state.photos_dirty = False
+        except Exception:
+            logger.exception("Slideshow loop error")
+
+        await asyncio.sleep(30)
+
+
 async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
     """Notice when the kiosk dies on its own (crash, or Firefox quitting).
 
@@ -238,6 +345,11 @@ def _start_call(room: str) -> None:
             room,
         )
         return
+    # Hand the screen over to the call immediately rather than waiting for the
+    # slideshow loop's next tick.
+    _stop_slideshow()
+    slideshow.display_on()
+
     kiosk.kill_stray_kiosk(FIREFOX_PROFILE_DIR)
     try:
         state.process = kiosk.launch(
@@ -299,6 +411,11 @@ def _on_end_call(_payload: dict) -> None:
     _end_call()
 
 
+def _on_photos_changed(_payload: dict) -> None:
+    """The app added or removed photos: refresh the cache right away."""
+    asyncio.create_task(sync_photos())
+
+
 async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) -> None:
     """Re-login periodically; set_auth() re-authorizes the joined channel in place."""
     while True:
@@ -343,6 +460,7 @@ async def run_once() -> None:
     )
     channel.on_broadcast("start_call", _on_start_call)
     channel.on_broadcast("end_call", _on_end_call)
+    channel.on_broadcast("photos_changed", _on_photos_changed)
 
     subscribed = asyncio.Event()
     failed = asyncio.Event()
@@ -372,6 +490,7 @@ async def run_once() -> None:
 
     state.channel = channel
     await publish_presence()
+    await sync_photos()
 
     refresh_task = asyncio.create_task(
         _refresh_auth_forever(client, int(auth.get("expires_in", 3600)))
@@ -392,6 +511,10 @@ async def main() -> None:
     stop = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stop.set)
+
+    slideshow_task = (
+        asyncio.create_task(_slideshow_loop()) if SLIDESHOW_ENABLED else None
+    )
 
     delay_idx = 0
     while not stop.is_set():
@@ -416,6 +539,9 @@ async def main() -> None:
         else:
             delay_idx = 0
 
+    if slideshow_task is not None:
+        slideshow_task.cancel()
+    _stop_slideshow()
     _end_call()
     logger.info("Shutting down")
 

@@ -117,3 +117,25 @@ If this ever becomes too much friction, the alternative is self-hosting Jitsi (r
 scp -r pi julienne@visio-tv.<your-tailnet>.ts.net:/home/julienne/visio-tv
 ssh julienne@visio-tv.<your-tailnet>.ts.net "/home/julienne/visio-tv/install.sh && systemctl --user restart visio-tv-listener.service"
 ```
+
+## Photo frame (slideshow between calls)
+
+The family uploads photos from `/photos` in the web app; the Pi mirrors them locally and shows them full screen with `imv` whenever it is idle and inside the time window.
+
+**No re-downloading**: photos live in `PHOTOS_DIR` (`~/visio-tv/photos`) and [photos.py](../pi/listener/photos.py) only fetches what is missing — a repeat sync costs one listing request (~0.1 s, a few KB), which matters on metered 4G. Uploads are downscaled to 1920 px JPEG in the browser first, so a 4 MB phone photo arrives as ~300 KB.
+
+Sync runs at startup, on the `photos_changed` broadcast (instant), and every 6 h as a safety net. `imv` freezes its file list at launch, so it is restarted after any sync that changed something.
+
+Priorities: **a call always wins** — the slideshow stops the moment a call starts and resumes after it ends. Outside `SLIDESHOW_START`–`SLIDESHOW_END` the video signal is cut (`wlopm --off`) so the screen drops into standby; there is no HDMI-CEC because the display is a VGA monitor behind an adapter.
+
+Debian ships `imv-wayland`/`imv-x11` rather than a plain `imv`, so [slideshow.py](../pi/listener/slideshow.py) auto-detects the binary. Install it with `sudo apt install imv`.
+
+Settings live in the Pi's `.env`: `SLIDESHOW_ENABLED`, `PHOTOS_DIR`, `SLIDESHOW_INTERVAL`, `SLIDESHOW_START`, `SLIDESHOW_END`.
+
+Checks:
+
+```
+ls ~/visio-tv/photos/                                  # local cache
+pgrep -af imv-wayland                                  # slideshow running?
+journalctl -n 20 _SYSTEMD_USER_UNIT=visio-tv-listener.service | grep -i photo
+```
