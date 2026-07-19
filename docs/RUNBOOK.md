@@ -44,9 +44,20 @@ The wrapper code is kept because it becomes usable as-is with either:
 
 To re-enable, set `KIOSK_URL=https://tv-visio.vercel.app/kiosk` in the Pi's `.env` and restart the service.
 
-## Known quirk: the Pi joins muted (manual unmute for now)
+## Auto-unmute (automatic — no action needed)
 
-meet.jit.si forces participants who arrive before the moderator to join with camera/mic off, regardless of URL `startWith*Muted=false` params. Until this is automated in the listener, unmute remotely over SSH once the call is live (Jitsi shortcuts: `v` = camera, `m` = mic — they are **toggles**, so only send them when the state is known):
+meet.jit.si forces participants who arrive before the moderator to join with camera/mic off, regardless of URL `startWith*Muted=false` params, and Jitsi never lets a moderator unmute someone remotely. Worse, Jitsi's keyboard shortcuts are **inert until the conference actually starts**, so blindly sending them on launch does nothing.
+
+The listener therefore runs a feedback loop (`_auto_unmute` in [main.py](../pi/listener/main.py)): it sends `v` (toggle video) every 5 s and watches whether the camera device actually opens. That single signal proves both that video is on *and* that shortcuts are now honoured — at which point one `m` unmutes the mic (which joined muted too). A keystroke is only ever sent while the camera is still closed, so it can never toggle video back off.
+
+Expected log sequence:
+
+```
+Auto-unmute: waiting for the conference to start (room=…)
+Auto-unmute: camera live, microphone unmuted (room=…)
+```
+
+It gives up after 15 min (`AUTO_UNMUTE_GIVE_UP_AFTER`). Set `AUTO_UNMUTE=false` in the Pi's `.env` to disable. Manual fallback:
 
 ```
 ssh julienne@visio-tv.<your-tailnet>.ts.net "export XDG_RUNTIME_DIR=/run/user/1000; export WAYLAND_DISPLAY=wayland-0; wtype v; sleep 2; wtype m"

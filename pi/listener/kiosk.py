@@ -109,6 +109,40 @@ def terminate(proc: subprocess.Popen, timeout: float = 5.0) -> None:
         pass
 
 
+def camera_in_use(video_device: str = "/dev/video0") -> bool:
+    """True when some process holds the camera open.
+
+    This is the feedback signal for auto-unmute: Jitsi only actually opens the
+    camera once video is unmuted *and* the conference has started.
+    """
+    try:
+        return (
+            subprocess.run(
+                ["fuser", video_device],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except FileNotFoundError:
+        logger.warning("fuser not available; cannot detect camera state")
+        return False
+
+
+def send_key(key: str) -> None:
+    """Send a keystroke to the focused window (the kiosk) via wtype."""
+    try:
+        subprocess.run(
+            ["wtype", key],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        logger.warning("wtype not available; cannot send keystrokes")
+
+
 def kill_stray_kiosk(profile_dir: str) -> None:
     """Best-effort cleanup of a kiosk firefox left over from a crash.
 

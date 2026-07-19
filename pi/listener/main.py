@@ -50,6 +50,11 @@ FIREFOX_PROFILE_DIR = os.environ.get(
 # itself and accept remote mic/camera commands). Empty = load meet.jit.si
 # directly, in which case the Pi joins muted and can't be controlled remotely.
 KIOSK_URL = os.environ.get("KIOSK_URL", "").strip()
+# Auto-unmute: meet.jit.si makes participants who arrive before the moderator
+# join muted, and Jitsi never lets a moderator unmute someone remotely.
+AUTO_UNMUTE = os.environ.get("AUTO_UNMUTE", "true").lower() not in ("0", "false", "no")
+AUTO_UNMUTE_INTERVAL = float(os.environ.get("AUTO_UNMUTE_INTERVAL", "5"))
+AUTO_UNMUTE_GIVE_UP_AFTER = float(os.environ.get("AUTO_UNMUTE_GIVE_UP_AFTER", "900"))
 
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -63,6 +68,7 @@ class CallState:
     def __init__(self):
         self.process: subprocess.Popen | None = None
         self.timeout_task: asyncio.Task | None = None
+        self.unmute_task: asyncio.Task | None = None
         self.room: str | None = None
         self.channel = None
         # Current Supabase access token, handed to the kiosk page so it can
@@ -95,6 +101,48 @@ async def publish_presence() -> None:
         )
     except Exception:
         logger.exception("Failed to publish presence")
+
+
+async def _auto_unmute(room: str) -> None:
+    """Turn the Pi's camera and microphone back on once the call really starts.
+
+    meet.jit.si forces participants arriving before the moderator to join
+    muted, and its keyboard shortcuts are inert until the conference actually
+    starts — so blind toggles are unreliable. Instead, toggle video ('v') and
+    watch whether the camera device actually opens: that single signal proves
+    both that video is now on and that shortcuts are being honoured, at which
+    point one 'm' unmutes the microphone (which joined muted too).
+
+    Because a keystroke is only ever sent while the camera is still closed,
+    this can never toggle video back off.
+    """
+    deadline = asyncio.get_running_loop().time() + AUTO_UNMUTE_GIVE_UP_AFTER
+    logged_waiting = False
+
+    while asyncio.get_running_loop().time() < deadline:
+        if state.room != room or state.process is None:
+            return  # call ended or replaced
+
+        if await asyncio.to_thread(kiosk.camera_in_use):
+            await asyncio.to_thread(kiosk.send_key, "m")
+            logger.info("Auto-unmute: camera live, microphone unmuted (room=%s)", room)
+            asyncio.create_task(publish_presence())
+            return
+
+        if not logged_waiting:
+            logger.info("Auto-unmute: waiting for the conference to start (room=%s)", room)
+            logged_waiting = True
+
+        await asyncio.to_thread(kiosk.send_key, "v")
+        await asyncio.sleep(AUTO_UNMUTE_INTERVAL)
+
+    logger.warning("Auto-unmute: gave up after %ss (room=%s)", AUTO_UNMUTE_GIVE_UP_AFTER, room)
+
+
+def _cancel_unmute() -> None:
+    if state.unmute_task is not None and not state.unmute_task.done():
+        state.unmute_task.cancel()
+    state.unmute_task = None
 
 
 def _cancel_timeout() -> None:
@@ -133,6 +181,9 @@ def _start_call(room: str) -> None:
     state.timeout_task = asyncio.create_task(
         _auto_teardown_after(MAX_CALL_DURATION_SECONDS, room)
     )
+    _cancel_unmute()
+    if AUTO_UNMUTE:
+        state.unmute_task = asyncio.create_task(_auto_unmute(room))
     asyncio.create_task(publish_presence())
     logger.info("start_call handled room=%s pid=%s", room, state.process.pid)
 
@@ -146,6 +197,7 @@ def _end_call() -> None:
     state.process = None
     state.room = None
     _cancel_timeout()
+    _cancel_unmute()
     try:
         asyncio.get_running_loop()
         asyncio.create_task(publish_presence())
