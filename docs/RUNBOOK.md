@@ -147,3 +147,13 @@ iPhones shoot HEIC, which only Safari decodes natively — `createImageBitmap` w
 Converting server-side was rejected: Supabase Image Transformations require the **Pro plan** (paid) and don't document HEIC as an input format.
 
 Verified with an official [Nokia HEIF conformance file](https://github.com/nokiatech/heif_conformance): 219 KB HEIC → 142 KB JPEG, uploaded and synced to the Pi.
+
+## Joining from a phone (deep links)
+
+Tapping a plain `https://meet.jit.si/<room>` link on mobile lands on Jitsi's own interstitial with a "Rejoindre depuis l'application" button — an extra tap every call. `joinLinks()` in [CallPanel.tsx](../web/app/components/CallPanel.tsx) skips it by detecting the platform after mount (never server-side: the server has no user agent and guessing breaks hydration):
+
+- **Android** — `intent://meet.jit.si/<room>#Intent;scheme=org.jitsi.meet;package=org.jitsi.meet;S.browser_fallback_url=<encoded https url>;end`. Custom schemes are blocked by Chrome on Android, so an intent URL is required; `browser_fallback_url` sends anyone without the app to the web version automatically.
+- **iOS** — `org.jitsi.meet://meet.jit.si/<room>`. This fails *silently* when the app isn't installed, which is why an "Ouvrir dans le navigateur" link stays visible underneath on mobile.
+- **Desktop** — plain https link, no app link rendered.
+
+Worth checking on a real phone: whether the Jitsi mobile app lets you sign in as moderator (meet.jit.si won't start the room otherwise). If it doesn't, use the browser link — hence keeping it one tap away.

@@ -11,6 +11,30 @@ const JITSI_BASE = "https://meet.jit.si";
 
 type PiStatus = "connecting" | "offline" | "idle" | "in_call";
 
+type Platform = "android" | "ios" | "other";
+
+/** Jitsi's own page shows a "Rejoindre depuis l'application" interstitial on
+ *  mobile. These links skip it and open the app directly.
+ *  - Android: custom schemes are blocked in Chrome, so an intent:// URL is
+ *    required; browser_fallback_url sends people without the app to the web.
+ *  - iOS: custom scheme only, and it fails silently when the app is missing —
+ *    hence the browser link is always kept visible next to it. */
+function joinLinks(room: string, platform: Platform) {
+  const web = `${JITSI_BASE}/${room}`;
+  if (platform === "android") {
+    return {
+      app: `intent://meet.jit.si/${room}#Intent;scheme=org.jitsi.meet;package=org.jitsi.meet;S.browser_fallback_url=${encodeURIComponent(
+        web
+      )};end`,
+      web,
+    };
+  }
+  if (platform === "ios") {
+    return { app: `org.jitsi.meet://meet.jit.si/${room}`, web };
+  }
+  return { app: null, web };
+}
+
 type PiPresence = {
   device?: string;
   status?: "idle" | "in_call";
@@ -29,6 +53,15 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     videoMuted: boolean;
   } | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
+  // Detected after mount: the server has no user agent, and guessing would
+  // cause a hydration mismatch.
+  const [platform, setPlatform] = useState<Platform>("other");
+
+  useEffect(() => {
+    const ua = navigator.userAgent;
+    if (/android/i.test(ua)) setPlatform("android");
+    else if (/iphone|ipad|ipod/i.test(ua)) setPlatform("ios");
+  }, []);
 
   useEffect(() => {
     const supabase = createClient();
@@ -178,14 +211,31 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           </button>
         ) : (
           <div className="flex w-full flex-col gap-3">
-            <a
-              href={`${JITSI_BASE}/${room}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500"
-            >
-              🎥 Rejoindre l’appel
-            </a>
+            {(() => {
+              const links = joinLinks(room, platform);
+              return (
+                <>
+                  <a
+                    href={links.app ?? links.web}
+                    target={links.app ? "_top" : "_blank"}
+                    rel="noopener noreferrer"
+                    className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500"
+                  >
+                    🎥 Rejoindre l’appel
+                  </a>
+                  {links.app && (
+                    <a
+                      href={links.web}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-center text-sm text-slate-400 underline underline-offset-4 transition hover:text-slate-200"
+                    >
+                      Ouvrir dans le navigateur
+                    </a>
+                  )}
+                </>
+              );
+            })()}
             <p className="text-center text-sm text-slate-400">
               Connecte-toi comme hôte dans Jitsi pour démarrer la salle.
             </p>
