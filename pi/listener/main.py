@@ -55,6 +55,8 @@ KIOSK_URL = os.environ.get("KIOSK_URL", "").strip()
 AUTO_UNMUTE = os.environ.get("AUTO_UNMUTE", "true").lower() not in ("0", "false", "no")
 AUTO_UNMUTE_INTERVAL = float(os.environ.get("AUTO_UNMUTE_INTERVAL", "5"))
 AUTO_UNMUTE_GIVE_UP_AFTER = float(os.environ.get("AUTO_UNMUTE_GIVE_UP_AFTER", "900"))
+# How often to check that the kiosk is still alive during a call.
+KIOSK_WATCH_INTERVAL = float(os.environ.get("KIOSK_WATCH_INTERVAL", "5"))
 
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -69,6 +71,7 @@ class CallState:
         self.process: subprocess.Popen | None = None
         self.timeout_task: asyncio.Task | None = None
         self.unmute_task: asyncio.Task | None = None
+        self.watch_task: asyncio.Task | None = None
         self.room: str | None = None
         self.channel = None
         # Current Supabase access token, handed to the kiosk page so it can
@@ -139,6 +142,40 @@ async def _auto_unmute(room: str) -> None:
     logger.warning("Auto-unmute: gave up after %ss (room=%s)", AUTO_UNMUTE_GIVE_UP_AFTER, room)
 
 
+async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
+    """Notice when the kiosk dies on its own (crash, or Firefox quitting).
+
+    Without this the call state would stay 'in_call' until the max-duration
+    timeout, so the app would show a phantom call, the auto-unmute loop would
+    keep firing keystrokes at whatever window has focus, and the dead process
+    would linger as a zombie (poll() also reaps it).
+    """
+    while True:
+        await asyncio.sleep(KIOSK_WATCH_INTERVAL)
+        if state.room != room or state.process is not proc:
+            return  # call already ended or replaced
+        rc = proc.poll()
+        if rc is None:
+            continue
+        logger.warning(
+            "Kiosk exited on its own (code=%s) during room=%s — clearing call state",
+            rc,
+            room,
+        )
+        state.process = None
+        state.room = None
+        _cancel_timeout()
+        _cancel_unmute()
+        await publish_presence()
+        return
+
+
+def _cancel_watch() -> None:
+    if state.watch_task is not None and not state.watch_task.done():
+        state.watch_task.cancel()
+    state.watch_task = None
+
+
 def _cancel_unmute() -> None:
     if state.unmute_task is not None and not state.unmute_task.done():
         state.unmute_task.cancel()
@@ -169,13 +206,22 @@ def _start_call(room: str) -> None:
         )
         return
     kiosk.kill_stray_kiosk(FIREFOX_PROFILE_DIR)
-    state.process = kiosk.launch(
-        room,
-        FIREFOX_BIN,
-        FIREFOX_PROFILE_DIR,
-        kiosk_base=KIOSK_URL or None,
-        access_token=state.access_token,
-    )
+    try:
+        state.process = kiosk.launch(
+            room,
+            FIREFOX_BIN,
+            FIREFOX_PROFILE_DIR,
+            kiosk_base=KIOSK_URL or None,
+            access_token=state.access_token,
+        )
+    except OSError:
+        # e.g. FIREFOX_BIN missing: stay 'idle' rather than advertising a call
+        # that does not exist.
+        logger.exception("Failed to launch the kiosk for room=%s", room)
+        state.process = None
+        state.room = None
+        asyncio.create_task(publish_presence())
+        return
     state.room = room
     _cancel_timeout()
     state.timeout_task = asyncio.create_task(
@@ -184,6 +230,8 @@ def _start_call(room: str) -> None:
     _cancel_unmute()
     if AUTO_UNMUTE:
         state.unmute_task = asyncio.create_task(_auto_unmute(room))
+    _cancel_watch()
+    state.watch_task = asyncio.create_task(_watch_kiosk(room, state.process))
     asyncio.create_task(publish_presence())
     logger.info("start_call handled room=%s pid=%s", room, state.process.pid)
 
@@ -198,6 +246,7 @@ def _end_call() -> None:
     state.room = None
     _cancel_timeout()
     _cancel_unmute()
+    _cancel_watch()
     try:
         asyncio.get_running_loop()
         asyncio.create_task(publish_presence())
