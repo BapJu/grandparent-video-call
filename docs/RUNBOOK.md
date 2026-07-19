@@ -44,6 +44,27 @@ The wrapper code is kept because it becomes usable as-is with either:
 
 To re-enable, set `KIOSK_URL=https://tv-visio.vercel.app/kiosk` in the Pi's `.env` and restart the service.
 
+## Reading the real call state (Marionette)
+
+meet.jit.si exposes no room API and refuses to be embedded for more than 5 minutes, so the only way to know what a call is really doing is to ask the page. The kiosk therefore launches Firefox with `--marionette` (localhost-only automation port), and [jitsi_probe.py](../pi/listener/jitsi_probe.py) evaluates a small script against Jitsi's Redux store:
+
+```
+cd /home/julienne/visio-tv/listener && ../venv/bin/python3 -c 'import jitsi_probe; print(jitsi_probe.get_state())'
+# {'ready': True, 'remote': 1, 'audioMuted': False, 'videoMuted': False}
+```
+
+`remote` (the participant count) is reliable and drives auto-hangup. **The mute flags are not**: while waiting for a moderator the page reports audio/video as unmuted even though the UI shows them off and the camera is closed — which is why unmuting uses the camera-device signal instead.
+
+## Auto-hangup when the call empties
+
+If the host closes their tab or hangs up from Jitsi rather than from the app, the Pi would otherwise stay in the room alone with camera and mic live. The monitor loop watches `remote` and, **once someone has actually been seen in the room**, hangs up `HANGUP_WHEN_ALONE_AFTER` seconds (default 60) after it empties. The "seen someone first" condition means a host who takes a while to join is never cut off.
+
+```
+Someone joined the call (1 remote, room=…)
+Everyone left, hanging up in 60.0s unless someone comes back
+Call empty for 60.0s — hanging up (room=…)
+```
+
 ## Auto-unmute (automatic — no action needed)
 
 meet.jit.si forces participants who arrive before the moderator to join with camera/mic off, regardless of URL `startWith*Muted=false` params, and Jitsi never lets a moderator unmute someone remotely. Worse, Jitsi's keyboard shortcuts are **inert until the conference actually starts**, so blindly sending them on launch does nothing.
