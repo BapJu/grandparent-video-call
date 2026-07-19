@@ -1,2 +1,2 @@
-realtime>=2.0.0
+realtime>=2.30,<3
 python-dotenv>=1.0.0
