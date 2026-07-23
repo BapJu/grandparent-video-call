@@ -7,33 +7,10 @@ import { createClient } from "@/lib/supabase/client";
 import SignOutButton from "./SignOutButton";
 
 const CHANNEL = "visio-tv-calls";
-const JITSI_BASE = "https://meet.jit.si";
+const JAAS_DOMAIN = "https://8x8.vc";
+const APP_ID = process.env.NEXT_PUBLIC_JAAS_APP_ID;
 
 type PiStatus = "connecting" | "offline" | "idle" | "in_call";
-
-type Platform = "android" | "ios" | "other";
-
-/** Jitsi's own page shows a "Rejoindre depuis l'application" interstitial on
- *  mobile. These links skip it and open the app directly.
- *  - Android: custom schemes are blocked in Chrome, so an intent:// URL is
- *    required; browser_fallback_url sends people without the app to the web.
- *  - iOS: custom scheme only, and it fails silently when the app is missing —
- *    hence the browser link is always kept visible next to it. */
-function joinLinks(room: string, platform: Platform) {
-  const web = `${JITSI_BASE}/${room}`;
-  if (platform === "android") {
-    return {
-      app: `intent://meet.jit.si/${room}#Intent;scheme=org.jitsi.meet;package=org.jitsi.meet;S.browser_fallback_url=${encodeURIComponent(
-        web
-      )};end`,
-      web,
-    };
-  }
-  if (platform === "ios") {
-    return { app: `org.jitsi.meet://meet.jit.si/${room}`, web };
-  }
-  return { app: null, web };
-}
 
 type PiPresence = {
   device?: string;
@@ -47,16 +24,14 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
   const [room, setRoom] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Signed JaaS join URL for the current room (null while it's being minted).
+  const [joinUrl, setJoinUrl] = useState<string | null>(null);
+  // Real mic/camera state reported by the Pi's kiosk page during a call.
+  const [media, setMedia] = useState<{
+    audioMuted: boolean;
+    videoMuted: boolean;
+  } | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
-  // Detected after mount: the server has no user agent, and guessing would
-  // cause a hydration mismatch.
-  const [platform, setPlatform] = useState<Platform>("other");
-
-  useEffect(() => {
-    const ua = navigator.userAgent;
-    if (/android/i.test(ua)) setPlatform("android");
-    else if (/iphone|ipad|ipod/i.test(ua)) setPlatform("ios");
-  }, []);
 
   useEffect(() => {
     const supabase = createClient();
@@ -95,6 +70,11 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
         .on("presence", { event: "sync" }, syncPi)
         .on("presence", { event: "join" }, syncPi)
         .on("presence", { event: "leave" }, syncPi)
+        .on("broadcast", { event: "media_state" }, ({ payload }) => {
+          const p = payload as { audio_muted?: boolean; video_muted?: boolean };
+          if (typeof p.audio_muted === "boolean" && typeof p.video_muted === "boolean")
+            setMedia({ audioMuted: p.audio_muted, videoMuted: p.video_muted });
+        })
         .subscribe((status, err) => {
           if (cancelled) return;
           if (status === "SUBSCRIBED") {
@@ -131,17 +111,60 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     []
   );
 
+  // Mint a JaaS join link for a room (signed server-side). Set as an <a> href
+  // rather than window.open so a mobile pop-up blocker can't swallow it.
+  const buildJoinUrl = useCallback(async (r: string) => {
+    setJoinUrl(null);
+    try {
+      const supabase = createClient();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const resp = await fetch("/api/jaas-token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session?.access_token}`,
+        },
+        body: JSON.stringify({ room: r, moderator: true }),
+      });
+      if (!resp.ok) throw new Error(`token ${resp.status}`);
+      const { token } = await resp.json();
+      setJoinUrl(
+        `${JAAS_DOMAIN}/${APP_ID}/${r}?jwt=${token}#config.disableDeepLinking=true`
+      );
+    } catch (e) {
+      console.error(e);
+      setError("Impossible de préparer le lien d'appel.");
+    }
+  }, []);
+
+  // Prepare the join link whenever a room becomes active (started here, or
+  // seen via the Pi's presence — e.g. a second family member).
+  useEffect(() => {
+    if (room && APP_ID) buildJoinUrl(room);
+    else setJoinUrl(null);
+  }, [room, buildJoinUrl]);
+
   const startCall = useCallback(async () => {
     const newRoom = `visio-tv-${crypto.randomUUID()}`;
     // Optimistic: presence from the Pi confirms it a moment later.
     setRoom(newRoom);
+    setMedia(null);
     await send("start_call", { room: newRoom });
   }, [send]);
 
   const endCall = useCallback(async () => {
     setRoom(null);
+    setMedia(null);
     await send("end_call", {});
   }, [send]);
+
+  // Ask the Pi (its kiosk page) to mute/unmute itself — Jitsi forbids a
+  // moderator from doing it to a remote participant, so the Pi acts on itself.
+  const setPiMedia = useCallback(async (want: { audio?: boolean; video?: boolean }) => {
+    await channelRef.current?.send({ type: "broadcast", event: "set_media", payload: want });
+  }, []);
 
   const badge = {
     connecting: { text: "Connexion…", cls: "bg-slate-700 text-slate-300" },
@@ -180,34 +203,37 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           </button>
         ) : (
           <div className="flex w-full flex-col gap-3">
-            {(() => {
-              const links = joinLinks(room, platform);
-              return (
-                <>
-                  <a
-                    href={links.app ?? links.web}
-                    target={links.app ? "_top" : "_blank"}
-                    rel="noopener noreferrer"
-                    className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500"
-                  >
-                    🎥 Rejoindre l’appel
-                  </a>
-                  {links.app && (
-                    <a
-                      href={links.web}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-center text-sm text-slate-400 underline underline-offset-4 transition hover:text-slate-200"
-                    >
-                      Ouvrir dans le navigateur
-                    </a>
-                  )}
-                </>
-              );
-            })()}
-            <p className="text-center text-sm text-slate-400">
-              Connecte-toi comme hôte dans Jitsi pour démarrer la salle.
-            </p>
+            {joinUrl ? (
+              <a
+                href={joinUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500"
+              >
+                🎥 Rejoindre l’appel
+              </a>
+            ) : (
+              <div className="w-full rounded-2xl bg-slate-800 px-6 py-8 text-center text-2xl font-bold text-slate-500">
+                Préparation…
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setPiMedia({ audio: !(media?.audioMuted ?? false) })}
+                disabled={!media}
+                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
+              >
+                {media?.audioMuted ? "🔇 Micro coupé" : "🎤 Micro actif"}
+              </button>
+              <button
+                onClick={() => setPiMedia({ video: !(media?.videoMuted ?? false) })}
+                disabled={!media}
+                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
+              >
+                {media?.videoMuted ? "🚫 Caméra coupée" : "📷 Caméra active"}
+              </button>
+            </div>
 
             <button
               onClick={endCall}

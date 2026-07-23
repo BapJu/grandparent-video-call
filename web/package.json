@@ -12,6 +12,7 @@
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.47.0",
     "heic-to": "^1.5.2",
+    "jose": "^6.2.4",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

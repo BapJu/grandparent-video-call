@@ -32,11 +32,13 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // /kiosk is loaded by the Pi's browser, which has no session cookie: it
-  // authenticates via a token in the URL hash instead.
+  // /kiosk is loaded by the Pi's browser (no session cookie — it uses a token
+  // in the URL hash), and /api routes do their own Bearer-token auth. Neither
+  // should be bounced to /login.
   const isPublicPath =
     request.nextUrl.pathname.startsWith("/login") ||
-    request.nextUrl.pathname.startsWith("/kiosk");
+    request.nextUrl.pathname.startsWith("/kiosk") ||
+    request.nextUrl.pathname.startsWith("/api");
 
   if (!user && !isPublicPath) {
     const url = request.nextUrl.clone();

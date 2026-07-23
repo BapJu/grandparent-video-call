@@ -3,24 +3,35 @@
 /**
  * Kiosk page loaded by the Raspberry Pi's Firefox kiosk (not by humans).
  *
- * Why this exists: Jitsi never lets a moderator unmute a remote participant
- * (by design, for privacy). But the IFrame API *can* control the local
- * participant — so by embedding Jitsi here, the Pi can unmute itself on join
- * and honour mic/camera commands sent from the family app.
+ * It embeds the JaaS meeting through the Jitsi IFrame API with a moderator
+ * JWT, so the Pi *starts* the room on its own — nobody has to sign in as
+ * moderator anymore. Being the local participant, it can also unmute itself
+ * cleanly (API commands, not simulated keystrokes).
+ *
+ * The Pi's OS-level actions (ringtone, speaker volume, hang-up, slideshow)
+ * live in the Python listener, so this page pushes the events it sees over the
+ * private Supabase channel and lets the listener act on them:
+ *   participant joined  -> "ring"
+ *   chat message        -> "stop_ring" (+ "volume" for +/-/plus/moins)
+ *   left alone          -> "call_empty"
+ *   conference closed   -> "call_ended"
+ * and it obeys "set_media" from the family app (remote mic/camera control).
  *
  * Params arrive in the URL hash (never sent to the server):
- *   #room=<jitsi-room>&token=<supabase-access-token>
+ *   #room=<room>&token=<supabase-access-token>[&moderator=1]
  */
 
 import { useEffect, useRef, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type RealtimeChannel } from "@supabase/supabase-js";
 
-const JITSI_DOMAIN = "meet.jit.si";
+const JAAS_DOMAIN = "8x8.vc";
+const APP_ID = process.env.NEXT_PUBLIC_JAAS_APP_ID!;
 const CHANNEL = "visio-tv-calls";
 
 type JitsiApi = {
   addListener: (event: string, handler: (payload: never) => void) => void;
   executeCommand: (command: string, ...args: unknown[]) => void;
+  getNumberOfParticipants: () => number;
   isAudioMuted: () => Promise<boolean>;
   isVideoMuted: () => Promise<boolean>;
   dispose: () => void;
@@ -38,30 +49,67 @@ function readHashParams() {
   return { room: p.get("room"), token: p.get("token") };
 }
 
+// Detect a volume command in a chat message. "+++" stacks (capped); ordinary
+// chat like "bonjour" returns 0 and is left alone.
+function volumeSteps(text: string): number {
+  const t = text.trim().toLowerCase();
+  if (t === "plus" || t === "+") return 1;
+  if (t === "moins" || t === "-") return -1;
+  if (t && /^\++$/.test(t)) return Math.min(t.length, 5);
+  if (t && /^-+$/.test(t)) return -Math.min(t.length, 5);
+  return 0;
+}
+
 export default function KioskPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiApi | null>(null);
+  const scriptRef = useRef<HTMLScriptElement | null>(null);
+  const cleanupChannelRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState("Chargement…");
 
   useEffect(() => {
     const { room, token } = readHashParams();
-    if (!room) {
-      setStatus("Aucune salle indiquée (#room=…)");
-      return;
-    }
+    if (!room) return setStatus("Aucune salle indiquée (#room=…)");
+    if (!APP_ID) return setStatus("JaaS non configuré");
 
     let disposed = false;
-    let cleanupRealtime: (() => void) | undefined;
 
-    const script = document.createElement("script");
-    script.src = `https://${JITSI_DOMAIN}/external_api.js`;
-    script.async = true;
+    (async () => {
+      // 1) Moderator JWT for this room.
+      let jwt: string;
+      try {
+        const resp = await fetch("/api/jaas-token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ room, moderator: true, name: "Mamie" }),
+        });
+        if (!resp.ok) throw new Error(`token ${resp.status}`);
+        jwt = (await resp.json()).token;
+      } catch (e) {
+        console.error(e);
+        return setStatus("Impossible d'obtenir le jeton JaaS");
+      }
+      if (disposed) return;
 
-    script.onload = () => {
+      // 2) Load the per-tenant IFrame API script, then start the meeting.
+      const script = document.createElement("script");
+      scriptRef.current = script;
+      script.src = `https://${JAAS_DOMAIN}/${APP_ID}/external_api.js`;
+      script.async = true;
+      script.onerror = () => setStatus("Impossible de charger JaaS");
+      script.onload = () => startMeeting(room!, token, jwt);
+      document.body.appendChild(script);
+    })();
+
+    function startMeeting(room: string, token: string | null, jwt: string) {
       if (disposed || !containerRef.current) return;
 
-      const api = new window.JitsiMeetExternalAPI(JITSI_DOMAIN, {
-        roomName: room,
+      const api = new window.JitsiMeetExternalAPI(JAAS_DOMAIN, {
+        roomName: `${APP_ID}/${room}`,
+        jwt,
         parentNode: containerRef.current,
         width: "100%",
         height: "100%",
@@ -72,96 +120,96 @@ export default function KioskPage() {
           startWithVideoMuted: false,
           disableDeepLinking: true,
           disableInviteFunctions: true,
+          p2p: { enabled: false },
+          resolution: 360,
+          constraints: { video: { height: { ideal: 360, max: 360, min: 180 } } },
         },
         interfaceConfigOverwrite: {
-          SHOW_JITSI_WATERMARK: false,
-          SHOW_WATERMARK_FOR_GUESTS: false,
           MOBILE_APP_PROMO: false,
+          SHOW_JITSI_WATERMARK: false,
         },
-        userInfo: { displayName: "Mamie" },
       });
       apiRef.current = api;
       setStatus("");
 
-      // --- self-unmute -------------------------------------------------
-      // meet.jit.si forces participants who arrive before the moderator to
-      // join muted, ignoring startWith*Muted. Fix it from the inside once
-      // the conference is actually joined.
+      // Link back to the listener over the private channel.
+      const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+      const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      let channel: RealtimeChannel | null = null;
+      if (url && anon && token) {
+        const supabase = createClient(url, anon);
+        supabase.realtime.setAuth(token);
+        channel = supabase.channel(CHANNEL, { config: { private: true } });
+        channel
+          .on("broadcast", { event: "set_media" }, async ({ payload }) => {
+            const want = payload as { audio?: boolean; video?: boolean };
+            if (typeof want.audio === "boolean" && (await api.isAudioMuted()) === want.audio)
+              api.executeCommand("toggleAudio");
+            if (typeof want.video === "boolean" && (await api.isVideoMuted()) === want.video)
+              api.executeCommand("toggleVideo");
+          })
+          .subscribe();
+        cleanupChannelRef.current = () => supabase.removeChannel(channel!);
+      }
+
+      const notify = (event: string, payload: object = {}) =>
+        channel?.send({ type: "broadcast", event, payload });
+
+      const publishMediaState = async () => {
+        try {
+          notify("media_state", {
+            audio_muted: await api.isAudioMuted(),
+            video_muted: await api.isVideoMuted(),
+          });
+        } catch {
+          /* best effort */
+        }
+      };
+
+      // Self-unmute cleanly via the API (no simulated keystrokes).
       const ensureUnmuted = async () => {
         try {
           if (await api.isAudioMuted()) api.executeCommand("toggleAudio");
           if (await api.isVideoMuted()) api.executeCommand("toggleVideo");
         } catch {
-          /* API not ready yet — the retries below cover it */
+          /* ignore */
         }
       };
 
+      let rang = false;
+
       api.addListener("videoConferenceJoined", () => {
-        // The conference can report "joined" while still waiting for a
-        // moderator, so retry for a while instead of unmuting just once.
         ensureUnmuted();
-        let tries = 0;
-        const timer = setInterval(() => {
-          if (disposed || ++tries > 20) return clearInterval(timer);
-          ensureUnmuted();
-        }, 3000);
+        publishMediaState();
+      });
+      api.addListener("audioMuteStatusChanged", publishMediaState);
+      api.addListener("videoMuteStatusChanged", publishMediaState);
+
+      api.addListener("participantJoined", () => {
+        notify("call_busy"); // cancel any pending "left alone" hang-up
+        if (!rang) {
+          rang = true;
+          notify("ring"); // caller is really here now
+        }
       });
 
-      // --- remote control from the family app ---------------------------
-      const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-      const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-      if (token && url && anon) {
-        const supabase = createClient(url, anon);
-        supabase.realtime.setAuth(token);
-        const channel = supabase.channel(CHANNEL, { config: { private: true } });
+      api.addListener("incomingMessage", (e: { message?: string }) => {
+        notify("stop_ring");
+        const steps = volumeSteps(e?.message ?? "");
+        if (steps) notify("volume", { steps });
+      });
 
-        const publishMediaState = async () => {
-          try {
-            await channel.send({
-              type: "broadcast",
-              event: "media_state",
-              payload: {
-                audio_muted: await api.isAudioMuted(),
-                video_muted: await api.isVideoMuted(),
-              },
-            });
-          } catch {
-            /* best effort */
-          }
-        };
-
-        channel
-          .on("broadcast", { event: "set_media" }, async ({ payload }) => {
-            const want = payload as { audio?: boolean; video?: boolean };
-            if (typeof want.audio === "boolean") {
-              const muted = await api.isAudioMuted();
-              if (muted === want.audio) api.executeCommand("toggleAudio");
-            }
-            if (typeof want.video === "boolean") {
-              const muted = await api.isVideoMuted();
-              if (muted === want.video) api.executeCommand("toggleVideo");
-            }
-          })
-          .subscribe();
-
-        api.addListener("audioMuteStatusChanged", publishMediaState);
-        api.addListener("videoMuteStatusChanged", publishMediaState);
-        api.addListener("videoConferenceJoined", publishMediaState);
-
-        cleanupRealtime = () => {
-          supabase.removeChannel(channel);
-        };
-      }
-    };
-
-    script.onerror = () => setStatus("Impossible de charger Jitsi");
-    document.body.appendChild(script);
+      api.addListener("participantLeft", () => {
+        if (api.getNumberOfParticipants() <= 1) notify("call_empty");
+      });
+      api.addListener("readyToClose", () => notify("call_ended"));
+    }
 
     return () => {
       disposed = true;
-      cleanupRealtime?.();
+      cleanupChannelRef.current?.();
       apiRef.current?.dispose();
-      script.remove();
+      scriptRef.current?.remove();
     };
   }, []);
 

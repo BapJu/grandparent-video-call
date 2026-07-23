@@ -1,12 +1,19 @@
-"""Supabase Realtime broadcast listener that drives the Jitsi kiosk.
+"""Supabase Realtime broadcast listener — the OS side of the video frame.
 
 Authenticates with a dedicated device account, joins the private Realtime
-channel and reacts to two broadcast events:
-  - start_call {"room": "<id>"}: launch firefox kiosk on that Jitsi room
-  - end_call: tear down the kiosk
+channel and launches/kills the Firefox kiosk on start_call/end_call. The kiosk
+loads the web app's /kiosk page, which embeds the JaaS meeting through the
+Jitsi IFrame API: being the local participant there, it unmutes itself and
+knows the real call state (participants, chat, mute) via clean API events.
 
-It also publishes the Pi's state (idle / in_call + room) via Realtime
-presence so the family web app can show live status.
+The kiosk page pushes those events back over the same private channel, and
+this listener performs the OS-level actions the browser can't:
+  ring / stop_ring   -> play or stop the ringtone (pw-play)
+  volume {steps}     -> nudge the speaker (wpctl)
+  call_busy/call_empty -> cancel or start the "left alone" hang-up countdown
+  call_ended         -> tear the call down
+
+It also runs the photo-frame slideshow while idle and publishes presence.
 
 Designed to be started by labwc autostart (via a systemd --user unit) inside
 the graphical session, so it inherits the Wayland socket needed to spawn a
@@ -25,7 +32,6 @@ from dotenv import load_dotenv
 from realtime import AsyncRealtimeClient, RealtimeSubscribeStates
 
 import audio
-import jitsi_probe
 import kiosk
 import photos
 import ringtone
@@ -51,15 +57,9 @@ FIREFOX_BIN = os.environ.get("FIREFOX_BIN", "/usr/bin/firefox")
 FIREFOX_PROFILE_DIR = os.environ.get(
     "FIREFOX_PROFILE_DIR", "/home/julienne/.config/visio-tv-ff"
 )
-# URL of the web app's /kiosk wrapper (embeds Jitsi so the Pi can unmute
-# itself and accept remote mic/camera commands). Empty = load meet.jit.si
-# directly, in which case the Pi joins muted and can't be controlled remotely.
+# URL of the web app's /kiosk page (embeds JaaS via the IFrame API). The Pi
+# joins as moderator, so the room starts on its own — no host login needed.
 KIOSK_URL = os.environ.get("KIOSK_URL", "").strip()
-# Auto-unmute: meet.jit.si makes participants who arrive before the moderator
-# join muted, and Jitsi never lets a moderator unmute someone remotely.
-AUTO_UNMUTE = os.environ.get("AUTO_UNMUTE", "true").lower() not in ("0", "false", "no")
-CALL_MONITOR_INTERVAL = float(os.environ.get("CALL_MONITOR_INTERVAL", "5"))
-AUTO_UNMUTE_GIVE_UP_AFTER = float(os.environ.get("AUTO_UNMUTE_GIVE_UP_AFTER", "900"))
 # Hang up this long after the last remote participant leaves, so the Pi never
 # sits alone in a room with its camera and mic live.
 HANGUP_WHEN_ALONE_AFTER = float(os.environ.get("HANGUP_WHEN_ALONE_AFTER", "60"))
@@ -92,29 +92,9 @@ RINGTONE_FILE = os.environ.get("RINGTONE_FILE", "/home/julienne/visio-tv/rington
 RINGTONE_DURATION = float(os.environ.get("RINGTONE_DURATION", "45"))
 
 # --- Volume by chat --------------------------------------------------------
-# The caller can nudge the speaker volume by typing +/- (or plus/moins) in the
-# Jitsi chat. Each command changes it by this much; a burst like "+++" stacks.
+# The kiosk page parses +/-/plus/moins from the Jitsi chat and sends the number
+# of steps; this is how many percent each step moves the speaker.
 VOLUME_STEP = int(os.environ.get("VOLUME_STEP", "10"))
-_MAX_STEPS_PER_MESSAGE = 5  # so one message can't slam it to the rails
-
-
-def parse_volume_command(text: str) -> int:
-    """Return the signed number of volume steps a chat message asks for.
-
-    "+"/"plus" → up, "-"/"moins" → down, "+++" → up three. 0 if it's not a
-    volume command, so normal chat (including the ringtone-stopping message)
-    is left alone.
-    """
-    t = text.strip().lower()
-    if t in ("plus", "+"):
-        return 1
-    if t in ("moins", "-", "–"):
-        return -1
-    if t and set(t) == {"+"}:
-        return min(len(t), _MAX_STEPS_PER_MESSAGE)
-    if t and set(t) == {"-"}:
-        return -min(len(t), _MAX_STEPS_PER_MESSAGE)
-    return 0
 
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -128,9 +108,9 @@ class CallState:
     def __init__(self):
         self.process: subprocess.Popen | None = None
         self.timeout_task: asyncio.Task | None = None
-        self.unmute_task: asyncio.Task | None = None
         self.watch_task: asyncio.Task | None = None
         self.ring_task: asyncio.Task | None = None
+        self.hangup_task: asyncio.Task | None = None
         self.room: str | None = None
         self.channel = None
         # Current Supabase access token, handed to the kiosk page so it can
@@ -168,110 +148,20 @@ async def publish_presence() -> None:
         logger.exception("Failed to publish presence")
 
 
-async def _monitor_call(room: str) -> None:
-    """Watch a live call: unmute the Pi, and hang up once it is left alone.
+async def _hangup_after_alone(room: str) -> None:
+    """Hang up if the Pi is left alone in the room for too long.
 
-    Reads the truth straight out of the Jitsi page (via Firefox's Marionette
-    port) rather than guessing:
-
-    * Hang up — the participant count comes from the page, so if everyone
-      leaves (or the host closes their tab instead of pressing Raccrocher) the
-      Pi doesn't sit in the room alone with camera and mic live, burning 4G.
-      The countdown only starts once somebody has actually been seen in the
-      room, so a host who takes a while to join is never cut off.
-    * Ringtone — starts when the caller actually joins, and stops early if a
-      chat message appears (sending one from the Jitsi app is easier than
-      switching back to the family app mid-call).
-    * Volume — a chat message of +/- (or plus/moins) nudges the speaker up or
-      down, since she can't reach the Pi's controls.
-    * Unmute — deliberately *not* driven by the page's mute flags: while
-      waiting for a moderator Jitsi reports audio/video as unmuted even though
-      the UI shows them off and the camera is closed. The camera device
-      actually opening is the only trustworthy signal, so unmuting keeps using
-      the keystroke-plus-camera-feedback approach.
+    Triggered by the kiosk page's `call_empty`; cancelled by `call_busy` when
+    someone (re)joins. This stops the Pi sitting alone with camera and mic live
+    (privacy + 4G) if the caller closes their tab instead of hanging up.
     """
-    loop = asyncio.get_running_loop()
-    give_up_at = loop.time() + AUTO_UNMUTE_GIVE_UP_AFTER
-    unmuted = False
-    seen_remote = False
-    alone_since: float | None = None
-    logged_waiting = False
-    # Chat message count when the ringtone started; None when not ringing.
-    messages_at_ring_start: int | None = None
-    # Messages already handled for volume commands (None = not yet baselined).
-    processed_messages: int | None = None
-
-    while True:
-        if state.room != room or state.process is None:
-            return  # call ended or replaced
-
-        # --- unmute: camera opening is the only trustworthy signal ---------
-        if not unmuted and loop.time() < give_up_at:
-            if await asyncio.to_thread(kiosk.camera_in_use):
-                await asyncio.to_thread(kiosk.send_key, "m")
-                unmuted = True
-                logger.info("Camera live, microphone unmuted (room=%s)", room)
-                asyncio.create_task(publish_presence())
-            else:
-                if not logged_waiting:
-                    logger.info("Waiting for the conference to start (room=%s)", room)
-                    logged_waiting = True
-                await asyncio.to_thread(kiosk.send_key, "v")
-
-        # --- hang up once the room empties --------------------------------
-        probe = await asyncio.to_thread(jitsi_probe.get_state)
-        if probe is not None:
-            remote = probe["remote"]
-            # A chat message means the caller (or she) is clearly there, so stop
-            # ringing. Only messages sent *while* it rings count: the baseline is
-            # taken when the ringing starts.
-            if (
-                messages_at_ring_start is not None
-                and probe["messages"] > messages_at_ring_start
-                and state.ring_task is not None
-                and not state.ring_task.done()
-            ):
-                logger.info("Chat message received — stopping the ringtone")
-                _cancel_ring()
-                messages_at_ring_start = None
-
-            # Volume commands (+/- / plus / moins) in new chat messages.
-            if processed_messages is None:
-                processed_messages = probe["messages"]  # don't act on backlog
-            elif probe["messages"] > processed_messages:
-                new_count = probe["messages"] - processed_messages
-                for text in probe.get("lastMessages", [])[-new_count:]:
-                    steps = parse_volume_command(text)
-                    if steps:
-                        await asyncio.to_thread(audio.nudge, steps * VOLUME_STEP)
-                processed_messages = probe["messages"]
-
-            if remote > 0:
-                if not seen_remote:
-                    logger.info("Someone joined the call (%s remote, room=%s)", remote, room)
-                    # Only ring once the caller is really there, so she isn't
-                    # summoned to a screen that's still waiting.
-                    if RINGTONE_ENABLED:
-                        _cancel_ring()
-                        messages_at_ring_start = probe["messages"]
-                        state.ring_task = asyncio.create_task(
-                            ringtone.ring(RINGTONE_FILE, RINGTONE_DURATION)
-                        )
-                seen_remote = True
-                alone_since = None
-            elif seen_remote:
-                if alone_since is None:
-                    alone_since = loop.time()
-                    logger.info(
-                        "Everyone left, hanging up in %ss unless someone comes back",
-                        HANGUP_WHEN_ALONE_AFTER,
-                    )
-                elif loop.time() - alone_since >= HANGUP_WHEN_ALONE_AFTER:
-                    logger.info("Call empty for %ss — hanging up (room=%s)", HANGUP_WHEN_ALONE_AFTER, room)
-                    _end_call()
-                    return
-
-        await asyncio.sleep(CALL_MONITOR_INTERVAL)
+    try:
+        await asyncio.sleep(HANGUP_WHEN_ALONE_AFTER)
+    except asyncio.CancelledError:
+        return
+    if state.room == room and state.process is not None:
+        logger.info("Call empty for %ss — hanging up (room=%s)", HANGUP_WHEN_ALONE_AFTER, room)
+        _end_call()
 
 
 def _within_slideshow_window(now: datetime | None = None) -> bool:
@@ -385,7 +275,8 @@ async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
         state.process = None
         state.room = None
         _cancel_timeout()
-        _cancel_unmute()
+        _cancel_ring()
+        _cancel_hangup()
         await publish_presence()
         return
 
@@ -402,10 +293,10 @@ def _cancel_watch() -> None:
     state.watch_task = None
 
 
-def _cancel_unmute() -> None:
-    if state.unmute_task is not None and not state.unmute_task.done():
-        state.unmute_task.cancel()
-    state.unmute_task = None
+def _cancel_hangup() -> None:
+    if state.hangup_task is not None and not state.hangup_task.done():
+        state.hangup_task.cancel()
+    state.hangup_task = None
 
 
 def _cancel_timeout() -> None:
@@ -424,6 +315,9 @@ async def _auto_teardown_after(seconds: int, room: str) -> None:
 
 
 def _start_call(room: str) -> None:
+    if not KIOSK_URL:
+        logger.error("KIOSK_URL not set — cannot start a call")
+        return
     if state.process is not None and state.process.poll() is None:
         logger.info(
             "Call already active (room=%s), ignoring start_call for room=%s",
@@ -442,7 +336,7 @@ def _start_call(room: str) -> None:
             room,
             FIREFOX_BIN,
             FIREFOX_PROFILE_DIR,
-            kiosk_base=KIOSK_URL or None,
+            kiosk_base=KIOSK_URL,
             access_token=state.access_token,
         )
     except OSError:
@@ -458,9 +352,8 @@ def _start_call(room: str) -> None:
     state.timeout_task = asyncio.create_task(
         _auto_teardown_after(MAX_CALL_DURATION_SECONDS, room)
     )
-    _cancel_unmute()
-    if AUTO_UNMUTE:
-        state.unmute_task = asyncio.create_task(_monitor_call(room))
+    _cancel_ring()
+    _cancel_hangup()
     _cancel_watch()
     state.watch_task = asyncio.create_task(_watch_kiosk(room, state.process))
     asyncio.create_task(publish_presence())
@@ -476,9 +369,9 @@ def _end_call() -> None:
     state.process = None
     state.room = None
     _cancel_timeout()
-    _cancel_unmute()
     _cancel_watch()
     _cancel_ring()
+    _cancel_hangup()
     try:
         asyncio.get_running_loop()
         asyncio.create_task(publish_presence())
@@ -501,6 +394,49 @@ def _on_end_call(_payload: dict) -> None:
 def _on_photos_changed(_payload: dict) -> None:
     """The app added or removed photos: refresh the cache right away."""
     asyncio.create_task(sync_photos())
+
+
+# --- events pushed by the kiosk page (its embedded Jitsi) ------------------
+
+def _on_ring(_payload: dict) -> None:
+    if not RINGTONE_ENABLED or state.process is None:
+        return
+    _cancel_ring()
+    state.ring_task = asyncio.create_task(ringtone.ring(RINGTONE_FILE, RINGTONE_DURATION))
+    logger.info("Ringing (caller joined)")
+
+
+def _on_stop_ring(_payload: dict) -> None:
+    if state.ring_task is not None and not state.ring_task.done():
+        logger.info("Stopping the ringtone (chat message)")
+    _cancel_ring()
+
+
+def _on_volume(payload: dict) -> None:
+    steps = (payload.get("payload") or {}).get("steps")
+    if isinstance(steps, int) and steps:
+        asyncio.create_task(asyncio.to_thread(audio.nudge, steps * VOLUME_STEP))
+
+
+def _on_call_busy(_payload: dict) -> None:
+    """Someone is in the room: cancel any pending "left alone" hang-up."""
+    if state.hangup_task is not None:
+        logger.info("Someone (re)joined — cancelling hang-up countdown")
+    _cancel_hangup()
+
+
+def _on_call_empty(_payload: dict) -> None:
+    """The Pi is alone: start the grace countdown before hanging up."""
+    if state.process is None or state.room is None:
+        return
+    if state.hangup_task is not None and not state.hangup_task.done():
+        return  # already counting down
+    logger.info("Everyone left, hanging up in %ss unless someone comes back", HANGUP_WHEN_ALONE_AFTER)
+    state.hangup_task = asyncio.create_task(_hangup_after_alone(state.room))
+
+
+def _on_call_ended(_payload: dict) -> None:
+    _end_call()
 
 
 async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) -> None:
@@ -548,6 +484,13 @@ async def run_once() -> None:
     channel.on_broadcast("start_call", _on_start_call)
     channel.on_broadcast("end_call", _on_end_call)
     channel.on_broadcast("photos_changed", _on_photos_changed)
+    # Events pushed by the kiosk page during a call.
+    channel.on_broadcast("ring", _on_ring)
+    channel.on_broadcast("stop_ring", _on_stop_ring)
+    channel.on_broadcast("volume", _on_volume)
+    channel.on_broadcast("call_busy", _on_call_busy)
+    channel.on_broadcast("call_empty", _on_call_empty)
+    channel.on_broadcast("call_ended", _on_call_ended)
 
     subscribed = asyncio.Event()
     failed = asyncio.Event()
