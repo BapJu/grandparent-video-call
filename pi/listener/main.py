@@ -24,6 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from realtime import AsyncRealtimeClient, RealtimeSubscribeStates
 
+import audio
 import jitsi_probe
 import kiosk
 import photos
@@ -89,6 +90,31 @@ RINGTONE_ENABLED = os.environ.get("RINGTONE_ENABLED", "true").lower() not in (
 )
 RINGTONE_FILE = os.environ.get("RINGTONE_FILE", "/home/julienne/visio-tv/ringtone.wav")
 RINGTONE_DURATION = float(os.environ.get("RINGTONE_DURATION", "45"))
+
+# --- Volume by chat --------------------------------------------------------
+# The caller can nudge the speaker volume by typing +/- (or plus/moins) in the
+# Jitsi chat. Each command changes it by this much; a burst like "+++" stacks.
+VOLUME_STEP = int(os.environ.get("VOLUME_STEP", "10"))
+_MAX_STEPS_PER_MESSAGE = 5  # so one message can't slam it to the rails
+
+
+def parse_volume_command(text: str) -> int:
+    """Return the signed number of volume steps a chat message asks for.
+
+    "+"/"plus" → up, "-"/"moins" → down, "+++" → up three. 0 if it's not a
+    volume command, so normal chat (including the ringtone-stopping message)
+    is left alone.
+    """
+    t = text.strip().lower()
+    if t in ("plus", "+"):
+        return 1
+    if t in ("moins", "-", "–"):
+        return -1
+    if t and set(t) == {"+"}:
+        return min(len(t), _MAX_STEPS_PER_MESSAGE)
+    if t and set(t) == {"-"}:
+        return -min(len(t), _MAX_STEPS_PER_MESSAGE)
+    return 0
 
 REALTIME_URL = (
     SUPABASE_URL.replace("https://", "wss://").replace("http://", "ws://")
@@ -156,6 +182,8 @@ async def _monitor_call(room: str) -> None:
     * Ringtone — starts when the caller actually joins, and stops early if a
       chat message appears (sending one from the Jitsi app is easier than
       switching back to the family app mid-call).
+    * Volume — a chat message of +/- (or plus/moins) nudges the speaker up or
+      down, since she can't reach the Pi's controls.
     * Unmute — deliberately *not* driven by the page's mute flags: while
       waiting for a moderator Jitsi reports audio/video as unmuted even though
       the UI shows them off and the camera is closed. The camera device
@@ -170,6 +198,8 @@ async def _monitor_call(room: str) -> None:
     logged_waiting = False
     # Chat message count when the ringtone started; None when not ringing.
     messages_at_ring_start: int | None = None
+    # Messages already handled for volume commands (None = not yet baselined).
+    processed_messages: int | None = None
 
     while True:
         if state.room != room or state.process is None:
@@ -204,6 +234,17 @@ async def _monitor_call(room: str) -> None:
                 logger.info("Chat message received — stopping the ringtone")
                 _cancel_ring()
                 messages_at_ring_start = None
+
+            # Volume commands (+/- / plus / moins) in new chat messages.
+            if processed_messages is None:
+                processed_messages = probe["messages"]  # don't act on backlog
+            elif probe["messages"] > processed_messages:
+                new_count = probe["messages"] - processed_messages
+                for text in probe.get("lastMessages", [])[-new_count:]:
+                    steps = parse_volume_command(text)
+                    if steps:
+                        await asyncio.to_thread(audio.nudge, steps * VOLUME_STEP)
+                processed_messages = probe["messages"]
 
             if remote > 0:
                 if not seen_remote:

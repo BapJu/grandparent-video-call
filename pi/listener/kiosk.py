@@ -21,12 +21,33 @@ JITSI_BASE = "https://meet.jit.si"
 
 # Unknown hash params are ignored by Jitsi, so both the old and new prejoin
 # config keys are included since the key has been renamed across versions.
+#
+# The quality caps are not cosmetic: the Pi 5 has *no hardware video encoder*
+# (unlike the Pi 4 — only a decoder, rpi-hevc-dec, exists), so every outgoing
+# frame is encoded in software. At Jitsi's default 720p with simulcast — which
+# encodes several resolutions at once — the CPU eventually can't keep up and
+# the call degrades to "poor connection" and then drops. Capping resolution,
+# frame rate and simulcast keeps it stable, and cuts 4G usage at the same time.
 JITSI_CONFIG_HASH = (
     "config.prejoinPageEnabled=false"
     "&config.prejoinConfig.enabled=false"
     "&config.startWithAudioMuted=false"
     "&config.startWithVideoMuted=false"
     "&config.disableDeepLinking=true"
+    # Force media through Jitsi's bridge instead of a direct peer-to-peer link.
+    # In P2P the Pi's outgoing video collapsed to ~3 kbps after a few minutes
+    # with *zero* packet loss — the signature of a failing direct path rather
+    # than a congested one. The bridge is a server both sides simply connect
+    # to, so there is no NAT path to break.
+    "&config.p2p.enabled=false"
+    # --- quality caps (CPU + 4G) ---
+    "&config.disableSimulcast=true"
+    "&config.resolution=360"
+    "&config.constraints.video.height.ideal=360"
+    "&config.constraints.video.height.max=360"
+    "&config.constraints.video.height.min=180"
+    "&config.constraints.video.frameRate.max=20"
+    "&config.startVideoQuality=360"
     "&interfaceConfig.SHOW_JITSI_WATERMARK=false"
     "&interfaceConfig.SHOW_WATERMARK_FOR_GUESTS=false"
 )
