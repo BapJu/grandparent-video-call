@@ -128,10 +128,12 @@ export default function KioskPage() {
         channel = supabase.channel(CHANNEL, { config: { private: true } });
         channel
           .on("broadcast", { event: "set_media" }, async ({ payload }) => {
+            // want.* is the DESIRED muted state: toggle only when we're not
+            // already there.
             const want = payload as { audio?: boolean; video?: boolean };
-            if (typeof want.audio === "boolean" && (await api.isAudioMuted()) === want.audio)
+            if (typeof want.audio === "boolean" && (await api.isAudioMuted()) !== want.audio)
               api.executeCommand("toggleAudio");
-            if (typeof want.video === "boolean" && (await api.isVideoMuted()) === want.video)
+            if (typeof want.video === "boolean" && (await api.isVideoMuted()) !== want.video)
               api.executeCommand("toggleVideo");
           })
           .subscribe();
@@ -173,6 +175,7 @@ export default function KioskPage() {
 
       api.addListener("participantJoined", () => {
         notify("call_busy"); // cancel any pending "left alone" hang-up
+        publishMediaState(); // so the caller's control buttons know the state
         if (!rang) {
           rang = true;
           notify("ring"); // caller is really here now

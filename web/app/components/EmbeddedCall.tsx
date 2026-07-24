@@ -104,26 +104,25 @@ export default function EmbeddedCall({
       {/* Controls for Mamie's end, laid over the top of the call. Jitsi's own
           toolbar (hang up, your mic/cam) is at the bottom. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center p-2">
-        <div className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-black/70 px-2 py-1.5 text-white backdrop-blur">
-          <span className="px-1.5 text-xs text-white/70">Mamie</span>
+        <div className="pointer-events-auto flex max-w-[96vw] items-center gap-0.5 rounded-full bg-black/70 px-1 py-1 text-white backdrop-blur">
           <button
             onClick={() => onVolume(-1)}
             aria-label="Baisser le volume de Mamie"
-            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15"
           >
             🔉
           </button>
           <button
             onClick={() => onVolume(1)}
             aria-label="Monter le volume de Mamie"
-            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15"
           >
             🔊
           </button>
           <button
             onClick={onStopRing}
             aria-label="Arrêter la sonnerie"
-            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15"
           >
             🔕
           </button>
@@ -132,7 +131,7 @@ export default function EmbeddedCall({
             onClick={() => onSetMedia({ audio: !(media?.audioMuted ?? false) })}
             disabled={!media}
             aria-label="Micro de Mamie"
-            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15 disabled:opacity-40"
+            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15 disabled:opacity-40"
           >
             {media?.audioMuted ? "🔇" : "🎤"}
           </button>
@@ -140,7 +139,7 @@ export default function EmbeddedCall({
             onClick={() => onSetMedia({ video: !(media?.videoMuted ?? false) })}
             disabled={!media}
             aria-label="Caméra de Mamie"
-            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15 disabled:opacity-40"
+            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15 disabled:opacity-40"
           >
             {media?.videoMuted ? "🚫" : "📷"}
           </button>
