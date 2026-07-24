@@ -121,6 +121,7 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     // Optimistic: presence from the Pi confirms it a moment later.
     setRoom(newRoom);
     setMedia(null);
+    setShowCall(true); // go straight into the call — no extra "Rejoindre" tap
     await send("start_call", { room: newRoom });
   }, [send]);
 
