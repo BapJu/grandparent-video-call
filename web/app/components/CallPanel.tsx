@@ -133,18 +133,12 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     await send("start_call", { room: newRoom });
   }, [send]);
 
-  const endCall = useCallback(async () => {
-    setRoom(null);
-    setMedia(null);
-    await send("end_call", {});
-  }, [send]);
-
-  // Hanging up inside the embedded call must end the whole call in one action:
-  // close the overlay AND tell the Pi, so there's no second "Raccrocher" to press.
-  const hangUp = useCallback(() => {
+  // Leaving the call just closes my own view. The Pi ends the call itself once
+  // it's alone in the room (see its kiosk page), so one caller hanging up never
+  // ends the call for the others — which is what multi-user needs.
+  const leaveCall = useCallback(() => {
     setShowCall(false);
-    endCall();
-  }, [endCall]);
+  }, []);
 
   // Ask the Pi (its kiosk page) to mute/unmute itself — Jitsi forbids a
   // moderator from doing it to a remote participant, so the Pi acts on itself.
@@ -201,31 +195,10 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
             >
               🎥 Rejoindre l’appel
             </button>
-
-            <div className="flex gap-3">
-              <button
-                onClick={() => setPiMedia({ audio: !(media?.audioMuted ?? false) })}
-                disabled={!media}
-                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
-              >
-                {media?.audioMuted ? "🔇 Micro coupé" : "🎤 Micro actif"}
-              </button>
-              <button
-                onClick={() => setPiMedia({ video: !(media?.videoMuted ?? false) })}
-                disabled={!media}
-                className="flex-1 rounded-xl border border-slate-700 px-4 py-3 text-base transition hover:bg-slate-900 disabled:opacity-40"
-              >
-                {media?.videoMuted ? "🚫 Caméra coupée" : "📷 Caméra active"}
-              </button>
-            </div>
-
-            <button
-              onClick={endCall}
-              disabled={busy}
-              className="w-full rounded-2xl bg-red-700 px-6 py-4 text-lg font-semibold transition hover:bg-red-600 disabled:opacity-50"
-            >
-              Raccrocher
-            </button>
+            <p className="text-center text-sm text-slate-400">
+              Appel en cours. Pour raccrocher, utilisez le bouton rouge dans l’appel —
+              il se termine tout seul quand tout le monde a quitté.
+            </p>
           </div>
         )}
 
@@ -252,7 +225,7 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
         <EmbeddedCall
           room={room}
           displayName={userEmail.split("@")[0]}
-          onClose={hangUp}
+          onClose={leaveCall}
           media={media}
           ringing={ringing}
           onSetMedia={setPiMedia}

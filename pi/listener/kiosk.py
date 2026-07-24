@@ -26,11 +26,17 @@ def build_kiosk_url(kiosk_base: str, room: str, access_token: str | None) -> str
 
     Room and token travel in the URL fragment, which browsers never send to the
     server — so the token stays off Vercel's logs.
+
+    A per-launch cache-buster (?v=<timestamp>) forces Firefox to fetch the
+    latest deployed page every call, so the unattended Pi can't get stuck on a
+    stale cached version after a deploy.
     """
     params = {"room": room}
     if access_token:
         params["token"] = access_token
-    return f"{kiosk_base.rstrip('/')}#{urllib.parse.urlencode(params)}"
+    base = kiosk_base.rstrip("/")
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}v={int(time.time())}#{urllib.parse.urlencode(params)}"
 
 
 def launch(
