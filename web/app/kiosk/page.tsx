@@ -107,8 +107,16 @@ export default function KioskPage() {
           disableDeepLinking: true,
           disableInviteFunctions: true,
           p2p: { enabled: false },
-          resolution: 360,
-          constraints: { video: { height: { ideal: 360, max: 360, min: 180 } } },
+          // The Pi 5 has no hardware video encoder, so outgoing video is
+          // encoded in software — 1080p would overload the CPU. 720p @ 24fps
+          // is the practical ceiling; verify CPU on a real call before raising.
+          resolution: 720,
+          constraints: {
+            video: {
+              height: { ideal: 720, max: 720, min: 360 },
+              frameRate: { max: 24 },
+            },
+          },
         },
         interfaceConfigOverwrite: {
           MOBILE_APP_PROMO: false,
