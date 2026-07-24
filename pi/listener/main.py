@@ -499,6 +499,14 @@ async def run_once() -> None:
         if status == RealtimeSubscribeStates.SUBSCRIBED:
             logger.info("Subscribed to channel=%s (private)", CHANNEL_NAME)
             subscribed.set()
+            # On a *re*-subscribe (realtime-py reconnected the socket on its
+            # own), the server has dropped our presence — re-publish it, or the
+            # app would keep showing the Pi offline. state.channel is only set
+            # after the initial subscribe, so this skips the first time (which
+            # run_once publishes explicitly just below).
+            if state.channel is not None:
+                logger.info("Re-subscribed after reconnect — republishing presence")
+                asyncio.create_task(publish_presence())
         elif status in (
             RealtimeSubscribeStates.CHANNEL_ERROR,
             RealtimeSubscribeStates.TIMED_OUT,
