@@ -130,6 +130,13 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     await send("end_call", {});
   }, [send]);
 
+  // Hanging up inside the embedded call must end the whole call in one action:
+  // close the overlay AND tell the Pi, so there's no second "Raccrocher" to press.
+  const hangUp = useCallback(() => {
+    setShowCall(false);
+    endCall();
+  }, [endCall]);
+
   // Ask the Pi (its kiosk page) to mute/unmute itself — Jitsi forbids a
   // moderator from doing it to a remote participant, so the Pi acts on itself.
   const setPiMedia = useCallback(async (want: { audio?: boolean; video?: boolean }) => {
@@ -231,7 +238,7 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
         <EmbeddedCall
           room={room}
           displayName={userEmail.split("@")[0]}
-          onClose={() => setShowCall(false)}
+          onClose={hangUp}
         />
       )}
     </main>
