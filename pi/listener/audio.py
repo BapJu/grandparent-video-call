@@ -1,17 +1,19 @@
 """Adjust the Pi's speaker volume.
 
-Used to let the caller nudge the volume up/down by typing +/- (or plus/moins)
-in the Jitsi chat — she can't reach the Pi's controls, and it's easier than
-switching back to the family app mid-call.
+Used to let the caller nudge the volume up/down from the call view, since she
+can't reach the Pi's controls.
 """
 
 import logging
+import os
 import subprocess
 
 logger = logging.getLogger("visio-tv.audio")
 
 DEFAULT_SINK = "@DEFAULT_AUDIO_SINK@"
-MAX_VOLUME = "1.0"  # cap so a burst of "+" can't push it into distortion
+# Allow software boost past 100% — a small speaker on the HDMI→VGA jack can be
+# quiet, so headroom matters more than the slight distortion risk near the top.
+MAX_VOLUME = os.environ.get("MAX_VOLUME", "1.5")
 
 
 def nudge(step_percent: int) -> None:
