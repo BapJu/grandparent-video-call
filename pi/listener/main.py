@@ -148,6 +148,27 @@ async def publish_presence() -> None:
         logger.exception("Failed to publish presence")
 
 
+async def _broadcast(event: str, payload: dict | None = None) -> None:
+    """Send a broadcast to the family app (best effort)."""
+    channel = state.channel
+    if channel is None:
+        return
+    try:
+        await channel.send_broadcast(event, payload or {})
+    except Exception:
+        logger.debug("broadcast %s failed", event, exc_info=True)
+
+
+async def _ring_with_signal() -> None:
+    """Play the ringtone and tell the app when it starts/stops, so the app can
+    show that it's ringing (and must be stopped manually)."""
+    await _broadcast("ringing", {"active": True})
+    try:
+        await ringtone.ring(RINGTONE_FILE, RINGTONE_DURATION)
+    finally:
+        await _broadcast("ringing", {"active": False})
+
+
 async def _hangup_after_alone(room: str) -> None:
     """Hang up if the Pi is left alone in the room for too long.
 
@@ -402,7 +423,7 @@ def _on_ring(_payload: dict) -> None:
     if not RINGTONE_ENABLED or state.process is None:
         return
     _cancel_ring()
-    state.ring_task = asyncio.create_task(ringtone.ring(RINGTONE_FILE, RINGTONE_DURATION))
+    state.ring_task = asyncio.create_task(_ring_with_signal())
     logger.info("Ringing (caller joined)")
 
 

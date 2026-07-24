@@ -1,1 +1,14 @@
 @import "tailwindcss";
+
+/* Wiggle for the "ringing — stop it" bell. */
+@keyframes visio-ring {
+  0%, 100% { transform: rotate(0); }
+  20% { transform: rotate(-18deg); }
+  40% { transform: rotate(14deg); }
+  60% { transform: rotate(-10deg); }
+  80% { transform: rotate(6deg); }
+}
+.animate-ring {
+  animation: visio-ring 0.7s ease-in-out infinite;
+  transform-origin: 50% 10%;
+}

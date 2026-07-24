@@ -26,6 +26,8 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
   const [busy, setBusy] = useState(false);
   // Whether the caller's own embedded call view is open.
   const [showCall, setShowCall] = useState(false);
+  // Whether the Pi is currently ringing (so the app can prompt to stop it).
+  const [ringing, setRinging] = useState(false);
   // Real mic/camera state reported by the Pi's kiosk page during a call.
   const [media, setMedia] = useState<{
     audioMuted: boolean;
@@ -75,6 +77,9 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           if (typeof p.audio_muted === "boolean" && typeof p.video_muted === "boolean")
             setMedia({ audioMuted: p.audio_muted, videoMuted: p.video_muted });
         })
+        .on("broadcast", { event: "ringing" }, ({ payload }) => {
+          setRinging(!!(payload as { active?: boolean }).active);
+        })
         .subscribe((status, err) => {
           if (cancelled) return;
           if (status === "SUBSCRIBED") {
@@ -113,7 +118,10 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
 
   // Leave the embedded call view when the room ends.
   useEffect(() => {
-    if (!room) setShowCall(false);
+    if (!room) {
+      setShowCall(false);
+      setRinging(false);
+    }
   }, [room]);
 
   const startCall = useCallback(async () => {
@@ -246,9 +254,13 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           displayName={userEmail.split("@")[0]}
           onClose={hangUp}
           media={media}
+          ringing={ringing}
           onSetMedia={setPiMedia}
           onVolume={(steps) => sendCommand("volume", { steps })}
-          onStopRing={() => sendCommand("stop_ring")}
+          onStopRing={() => {
+            setRinging(false); // optimistic: the button reacts instantly
+            sendCommand("stop_ring");
+          }}
         />
       )}
     </main>

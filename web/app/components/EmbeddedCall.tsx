@@ -18,6 +18,7 @@ export default function EmbeddedCall({
   displayName,
   onClose,
   media,
+  ringing,
   onSetMedia,
   onVolume,
   onStopRing,
@@ -26,6 +27,7 @@ export default function EmbeddedCall({
   displayName: string;
   onClose: () => void;
   media: { audioMuted: boolean; videoMuted: boolean } | null;
+  ringing: boolean;
   onSetMedia: (want: { audio?: boolean; video?: boolean }) => void;
   onVolume: (steps: number) => void;
   onStopRing: () => void;
@@ -119,13 +121,6 @@ export default function EmbeddedCall({
           >
             🔊
           </button>
-          <button
-            onClick={onStopRing}
-            aria-label="Arrêter la sonnerie"
-            className="rounded-full px-2.5 py-1.5 text-base transition hover:bg-white/15"
-          >
-            🔕
-          </button>
           <span className="mx-0.5 h-5 w-px bg-white/20" />
           <button
             onClick={() => onSetMedia({ audio: !(media?.audioMuted ?? false) })}
@@ -145,6 +140,20 @@ export default function EmbeddedCall({
           </button>
         </div>
       </div>
+
+      {/* While the Pi is ringing, a big animated prompt: it won't stop on its
+          own, the caller has to tap it. */}
+      {ringing && (
+        <div className="pointer-events-none absolute inset-x-0 top-16 flex justify-center px-4">
+          <button
+            onClick={onStopRing}
+            className="pointer-events-auto flex items-center gap-3 rounded-full bg-amber-500 px-6 py-4 text-lg font-bold text-black shadow-2xl"
+          >
+            <span className="animate-ring text-3xl">🔔</span>
+            Couper la sonnerie
+          </button>
+        </div>
+      )}
     </div>
   );
 }
