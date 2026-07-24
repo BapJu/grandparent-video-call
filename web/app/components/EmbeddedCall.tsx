@@ -17,10 +17,18 @@ export default function EmbeddedCall({
   room,
   displayName,
   onClose,
+  media,
+  onSetMedia,
+  onVolume,
+  onStopRing,
 }: {
   room: string;
   displayName: string;
   onClose: () => void;
+  media: { audioMuted: boolean; videoMuted: boolean } | null;
+  onSetMedia: (want: { audio?: boolean; video?: boolean }) => void;
+  onVolume: (steps: number) => void;
+  onStopRing: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const apiRef = useRef<JitsiEmbedApi | null>(null);
@@ -92,6 +100,52 @@ export default function EmbeddedCall({
   return (
     <div className="fixed inset-0 z-50 bg-black">
       <div ref={containerRef} className="h-full w-full" />
+
+      {/* Controls for Mamie's end, laid over the top of the call. Jitsi's own
+          toolbar (hang up, your mic/cam) is at the bottom. */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-center p-2">
+        <div className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-black/70 px-2 py-1.5 text-white backdrop-blur">
+          <span className="px-1.5 text-xs text-white/70">Mamie</span>
+          <button
+            onClick={() => onVolume(-1)}
+            aria-label="Baisser le volume de Mamie"
+            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+          >
+            🔉
+          </button>
+          <button
+            onClick={() => onVolume(1)}
+            aria-label="Monter le volume de Mamie"
+            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+          >
+            🔊
+          </button>
+          <button
+            onClick={onStopRing}
+            aria-label="Arrêter la sonnerie"
+            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15"
+          >
+            🔕
+          </button>
+          <span className="mx-0.5 h-5 w-px bg-white/20" />
+          <button
+            onClick={() => onSetMedia({ audio: !(media?.audioMuted ?? false) })}
+            disabled={!media}
+            aria-label="Micro de Mamie"
+            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15 disabled:opacity-40"
+          >
+            {media?.audioMuted ? "🔇" : "🎤"}
+          </button>
+          <button
+            onClick={() => onSetMedia({ video: !(media?.videoMuted ?? false) })}
+            disabled={!media}
+            aria-label="Caméra de Mamie"
+            className="rounded-full px-3 py-1.5 text-lg transition hover:bg-white/15 disabled:opacity-40"
+          >
+            {media?.videoMuted ? "🚫" : "📷"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

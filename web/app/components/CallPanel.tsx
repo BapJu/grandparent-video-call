@@ -143,6 +143,11 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     await channelRef.current?.send({ type: "broadcast", event: "set_media", payload: want });
   }, []);
 
+  // Fire a control at the Pi's listener (volume nudge, stop the ringtone).
+  const sendCommand = useCallback((event: string, payload: object = {}) => {
+    channelRef.current?.send({ type: "broadcast", event, payload });
+  }, []);
+
   const badge = {
     connecting: { text: "Connexion…", cls: "bg-slate-700 text-slate-300" },
     offline: { text: "Hors ligne", cls: "bg-red-950 text-red-300" },
@@ -239,6 +244,10 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           room={room}
           displayName={userEmail.split("@")[0]}
           onClose={hangUp}
+          media={media}
+          onSetMedia={setPiMedia}
+          onVolume={(steps) => sendCommand("volume", { steps })}
+          onStopRing={() => sendCommand("stop_ring")}
         />
       )}
     </main>
