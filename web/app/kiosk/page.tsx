@@ -23,25 +23,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createClient, type RealtimeChannel } from "@supabase/supabase-js";
+import type { JitsiEmbedApi } from "@/lib/jitsi";
 
 const JAAS_DOMAIN = "8x8.vc";
 const APP_ID = process.env.NEXT_PUBLIC_JAAS_APP_ID!;
 const CHANNEL = "visio-tv-calls";
-
-type JitsiApi = {
-  addListener: (event: string, handler: (payload: never) => void) => void;
-  executeCommand: (command: string, ...args: unknown[]) => void;
-  getNumberOfParticipants: () => number;
-  isAudioMuted: () => Promise<boolean>;
-  isVideoMuted: () => Promise<boolean>;
-  dispose: () => void;
-};
-
-declare global {
-  interface Window {
-    JitsiMeetExternalAPI: new (domain: string, options: object) => JitsiApi;
-  }
-}
 
 function readHashParams() {
   if (typeof window === "undefined") return { room: null, token: null };
@@ -62,7 +48,7 @@ function volumeSteps(text: string): number {
 
 export default function KioskPage() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const apiRef = useRef<JitsiApi | null>(null);
+  const apiRef = useRef<JitsiEmbedApi | null>(null);
   const scriptRef = useRef<HTMLScriptElement | null>(null);
   const cleanupChannelRef = useRef<(() => void) | null>(null);
   const [status, setStatus] = useState("Chargement…");

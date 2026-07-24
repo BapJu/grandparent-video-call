@@ -5,9 +5,9 @@ import Link from "next/link";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/client";
 import SignOutButton from "./SignOutButton";
+import EmbeddedCall from "./EmbeddedCall";
 
 const CHANNEL = "visio-tv-calls";
-const JAAS_DOMAIN = "https://8x8.vc";
 const APP_ID = process.env.NEXT_PUBLIC_JAAS_APP_ID;
 
 type PiStatus = "connecting" | "offline" | "idle" | "in_call";
@@ -24,8 +24,8 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
   const [room, setRoom] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Signed JaaS join URL for the current room (null while it's being minted).
-  const [joinUrl, setJoinUrl] = useState<string | null>(null);
+  // Whether the caller's own embedded call view is open.
+  const [showCall, setShowCall] = useState(false);
   // Real mic/camera state reported by the Pi's kiosk page during a call.
   const [media, setMedia] = useState<{
     audioMuted: boolean;
@@ -111,40 +111,10 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
     []
   );
 
-  // Mint a JaaS join link for a room (signed server-side). Set as an <a> href
-  // rather than window.open so a mobile pop-up blocker can't swallow it.
-  const buildJoinUrl = useCallback(async (r: string) => {
-    setJoinUrl(null);
-    try {
-      const supabase = createClient();
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const resp = await fetch("/api/jaas-token", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: JSON.stringify({ room: r, moderator: true }),
-      });
-      if (!resp.ok) throw new Error(`token ${resp.status}`);
-      const { token } = await resp.json();
-      setJoinUrl(
-        `${JAAS_DOMAIN}/${APP_ID}/${r}?jwt=${token}#config.disableDeepLinking=true`
-      );
-    } catch (e) {
-      console.error(e);
-      setError("Impossible de préparer le lien d'appel.");
-    }
-  }, []);
-
-  // Prepare the join link whenever a room becomes active (started here, or
-  // seen via the Pi's presence — e.g. a second family member).
+  // Leave the embedded call view when the room ends.
   useEffect(() => {
-    if (room && APP_ID) buildJoinUrl(room);
-    else setJoinUrl(null);
-  }, [room, buildJoinUrl]);
+    if (!room) setShowCall(false);
+  }, [room]);
 
   const startCall = useCallback(async () => {
     const newRoom = `visio-tv-${crypto.randomUUID()}`;
@@ -203,20 +173,13 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
           </button>
         ) : (
           <div className="flex w-full flex-col gap-3">
-            {joinUrl ? (
-              <a
-                href={joinUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500"
-              >
-                🎥 Rejoindre l’appel
-              </a>
-            ) : (
-              <div className="w-full rounded-2xl bg-slate-800 px-6 py-8 text-center text-2xl font-bold text-slate-500">
-                Préparation…
-              </div>
-            )}
+            <button
+              onClick={() => setShowCall(true)}
+              disabled={!APP_ID}
+              className="w-full rounded-2xl bg-sky-600 px-6 py-8 text-center text-2xl font-bold transition hover:bg-sky-500 disabled:opacity-50"
+            >
+              🎥 Rejoindre l’appel
+            </button>
 
             <div className="flex gap-3">
               <button
@@ -263,6 +226,14 @@ export default function CallPanel({ userEmail }: { userEmail: string }) {
         <span>{userEmail}</span>
         <SignOutButton />
       </footer>
+
+      {showCall && room && (
+        <EmbeddedCall
+          room={room}
+          displayName={userEmail.split("@")[0]}
+          onClose={() => setShowCall(false)}
+        />
+      )}
     </main>
   );
 }
