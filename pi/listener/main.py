@@ -125,13 +125,7 @@ state = CallState()
 
 
 async def publish_presence() -> None:
-    """Publish the Pi's current state.
-
-    Note: realtime-py's track() appends a presence entry instead of replacing
-    the previous one, and untrack() does not reliably clear it, so several
-    entries can live under the 'pi' key. Consumers must therefore use the most
-    recent one (highest 'since') — see web/app/components/CallPanel.tsx.
-    """
+    """Publish the Pi's current state."""
     channel = state.channel
     if channel is None:
         return
@@ -146,6 +140,14 @@ async def publish_presence() -> None:
         )
     except Exception:
         logger.exception("Failed to publish presence")
+
+
+async def _presence_heartbeat_forever(interval: int = 25) -> None:
+    """Periodically refresh presence so Supabase Realtime keeps the device online."""
+    while True:
+        await asyncio.sleep(interval)
+        if state.channel is not None:
+            await publish_presence()
 
 
 async def _broadcast(event: str, payload: dict | None = None) -> None:
@@ -170,12 +172,7 @@ async def _ring_with_signal() -> None:
 
 
 async def _hangup_after_alone(room: str) -> None:
-    """Hang up if the Pi is left alone in the room for too long.
-
-    Triggered by the kiosk page's `call_empty`; cancelled by `call_busy` when
-    someone (re)joins. This stops the Pi sitting alone with camera and mic live
-    (privacy + 4G) if the caller closes their tab instead of hanging up.
-    """
+    """Hang up if the Pi is left alone in the room for too long."""
     try:
         await asyncio.sleep(HANGUP_WHEN_ALONE_AFTER)
     except asyncio.CancelledError:
@@ -186,10 +183,7 @@ async def _hangup_after_alone(room: str) -> None:
 
 
 def _within_slideshow_window(now: datetime | None = None) -> bool:
-    """True when the current local time is inside the photo-frame window.
-
-    Handles windows that wrap past midnight (e.g. 21:00 → 09:00).
-    """
+    """True when the current local time is inside the photo-frame window."""
     now = now or datetime.now()
     try:
         start_h, start_m = (int(x) for x in SLIDESHOW_START.split(":"))
@@ -223,16 +217,11 @@ async def sync_photos() -> None:
         photos.sync, SUPABASE_URL, SUPABASE_ANON_KEY, state.access_token, PHOTOS_DIR
     )
     if added or removed:
-        # imv freezes its file list at launch, so it must be restarted to pick
-        # up new or deleted photos.
         state.photos_dirty = True
 
 
 async def _slideshow_loop() -> None:
-    """Run the photo frame whenever the Pi is idle and inside the time window.
-
-    A call always wins: the kiosk needs the screen to itself.
-    """
+    """Run the photo frame whenever the Pi is idle and inside the time window."""
     last_sync = 0.0
     loop = asyncio.get_running_loop()
 
@@ -248,7 +237,6 @@ async def _slideshow_loop() -> None:
             )
 
             if in_call:
-                # The call owns the screen.
                 if running:
                     _stop_slideshow()
                 slideshow.display_on()
@@ -274,17 +262,11 @@ async def _slideshow_loop() -> None:
 
 
 async def _watch_kiosk(room: str, proc: subprocess.Popen) -> None:
-    """Notice when the kiosk dies on its own (crash, or Firefox quitting).
-
-    Without this the call state would stay 'in_call' until the max-duration
-    timeout, so the app would show a phantom call, the auto-unmute loop would
-    keep firing keystrokes at whatever window has focus, and the dead process
-    would linger as a zombie (poll() also reaps it).
-    """
+    """Notice when the kiosk dies on its own."""
     while True:
         await asyncio.sleep(KIOSK_WATCH_INTERVAL)
         if state.room != room or state.process is not proc:
-            return  # call already ended or replaced
+            return
         rc = proc.poll()
         if rc is None:
             continue
@@ -346,8 +328,6 @@ def _start_call(room: str) -> None:
             room,
         )
         return
-    # Hand the screen over to the call immediately rather than waiting for the
-    # slideshow loop's next tick.
     _stop_slideshow()
     slideshow.display_on()
 
@@ -361,8 +341,6 @@ def _start_call(room: str) -> None:
             access_token=state.access_token,
         )
     except OSError:
-        # e.g. FIREFOX_BIN missing: stay 'idle' rather than advertising a call
-        # that does not exist.
         logger.exception("Failed to launch the kiosk for room=%s", room)
         state.process = None
         state.room = None
@@ -397,7 +375,7 @@ def _end_call() -> None:
         asyncio.get_running_loop()
         asyncio.create_task(publish_presence())
     except RuntimeError:
-        pass  # called outside the loop during final shutdown
+        pass
 
 
 def _on_start_call(payload: dict) -> None:
@@ -413,11 +391,8 @@ def _on_end_call(_payload: dict) -> None:
 
 
 def _on_photos_changed(_payload: dict) -> None:
-    """The app added or removed photos: refresh the cache right away."""
     asyncio.create_task(sync_photos())
 
-
-# --- events pushed by the kiosk page (its embedded Jitsi) ------------------
 
 def _on_ring(_payload: dict) -> None:
     if not RINGTONE_ENABLED or state.process is None:
@@ -440,18 +415,16 @@ def _on_volume(payload: dict) -> None:
 
 
 def _on_call_busy(_payload: dict) -> None:
-    """Someone is in the room: cancel any pending "left alone" hang-up."""
     if state.hangup_task is not None:
         logger.info("Someone (re)joined — cancelling hang-up countdown")
     _cancel_hangup()
 
 
 def _on_call_empty(_payload: dict) -> None:
-    """The Pi is alone: start the grace countdown before hanging up."""
     if state.process is None or state.room is None:
         return
     if state.hangup_task is not None and not state.hangup_task.done():
-        return  # already counting down
+        return
     logger.info("Everyone left, hanging up in %ss unless someone comes back", HANGUP_WHEN_ALONE_AFTER)
     state.hangup_task = asyncio.create_task(_hangup_after_alone(state.room))
 
@@ -479,7 +452,7 @@ async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) ->
             logger.info("Auth token refreshed (next in ~%ss)", min(2700, int(expires_in * 0.75)))
         except Exception:
             logger.exception("Token refresh failed, retrying in 60s")
-            expires_in = 80  # retry soon; server drop is caught by the outer loop
+            expires_in = 80
 
 
 async def run_once() -> None:
@@ -495,7 +468,6 @@ async def run_once() -> None:
 
     client = AsyncRealtimeClient(REALTIME_URL, SUPABASE_ANON_KEY)
     await client.connect()
-    # Must be set before subscribe so the join payload carries the JWT.
     await client.set_auth(auth["access_token"])
 
     channel = client.channel(
@@ -505,7 +477,6 @@ async def run_once() -> None:
     channel.on_broadcast("start_call", _on_start_call)
     channel.on_broadcast("end_call", _on_end_call)
     channel.on_broadcast("photos_changed", _on_photos_changed)
-    # Events pushed by the kiosk page during a call.
     channel.on_broadcast("ring", _on_ring)
     channel.on_broadcast("stop_ring", _on_stop_ring)
     channel.on_broadcast("volume", _on_volume)
@@ -520,11 +491,6 @@ async def run_once() -> None:
         if status == RealtimeSubscribeStates.SUBSCRIBED:
             logger.info("Subscribed to channel=%s (private)", CHANNEL_NAME)
             subscribed.set()
-            # On a *re*-subscribe (realtime-py reconnected the socket on its
-            # own), the server has dropped our presence — re-publish it, or the
-            # app would keep showing the Pi offline. state.channel is only set
-            # after the initial subscribe, so this skips the first time (which
-            # run_once publishes explicitly just below).
             if state.channel is not None:
                 logger.info("Re-subscribed after reconnect — republishing presence")
                 asyncio.create_task(publish_presence())
@@ -554,12 +520,13 @@ async def run_once() -> None:
     refresh_task = asyncio.create_task(
         _refresh_auth_forever(client, int(auth.get("expires_in", 3600)))
     )
+    heartbeat_task = asyncio.create_task(_presence_heartbeat_forever(25))
+
     try:
-        # The client handles incoming messages via its own background task;
-        # this coroutine just needs to stay alive until the connection drops.
         await asyncio.Event().wait()
     finally:
         refresh_task.cancel()
+        heartbeat_task.cancel()
         state.channel = None
 
 
