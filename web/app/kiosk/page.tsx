@@ -107,14 +107,29 @@ export default function KioskPage() {
           disableDeepLinking: true,
           disableInviteFunctions: true,
           p2p: { enabled: false },
-          // The Pi 5 has no hardware video encoder, so outgoing video is
-          // encoded in software — 1080p would overload the CPU. 720p @ 24fps
-          // is the practical ceiling; verify CPU on a real call before raising.
+
+          // --- Optimisations Réseau 4G & Élimination du "Connection Poor" ---
+          // 1. Désactive le simulcast : n'encode et n'envoie qu'UN SEUL flux vidéo au lieu de 3
+          disableSimulcast: true,
+
+          // 2. Suspend les couches de transmission inutiles
+          enableLayerSuspension: true,
+
+          // 3. Forcer le codec H264 plus économe en calcul/bande passante
+          videoQuality: {
+            preferredCodec: "H264",
+          },
+
+          // 4. Plafond de débit montant (1200 kbps max pour stabiliser la 4G)
+          startBitrate: 1000,
+
+          // 5. Résolution 720p @ 20-24fps
           resolution: 720,
           constraints: {
             video: {
               height: { ideal: 720, max: 720, min: 360 },
-              frameRate: { max: 24 },
+              width: { ideal: 1280, max: 1280, min: 640 },
+              frameRate: { ideal: 20, max: 24 },
             },
           },
         },
