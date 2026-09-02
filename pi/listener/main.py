@@ -102,6 +102,12 @@ REALTIME_URL = (
 )
 
 RECONNECT_DELAYS = [5, 10, 20, 60]
+# A broken websocket can leave the Python Realtime client's background listener
+# task dead while the main process (and token-refresh task) keeps running.  A
+# timeout here gives systemd a real failure to restart instead of reporting a
+# misleading, permanently "active" service.
+PRESENCE_PUBLISH_TIMEOUT = 15
+PRESENCE_FAILURE_LIMIT = 3
 
 
 class CallState:
@@ -124,30 +130,65 @@ class CallState:
 state = CallState()
 
 
-async def publish_presence() -> None:
-    """Publish the Pi's current state."""
+async def publish_presence() -> bool:
+    """Publish the Pi's current state and report whether it reached Realtime."""
     channel = state.channel
     if channel is None:
-        return
+        return False
     try:
-        await channel.track(
-            {
-                "device": "pi",
-                "status": "in_call" if state.room else "idle",
-                "room": state.room,
-                "since": datetime.now(timezone.utc).isoformat(),
-            }
+        await asyncio.wait_for(
+            channel.track(
+                {
+                    "device": "pi",
+                    "status": "in_call" if state.room else "idle",
+                    "room": state.room,
+                    "since": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            timeout=PRESENCE_PUBLISH_TIMEOUT,
         )
+        return True
     except Exception:
         logger.exception("Failed to publish presence")
+        return False
 
 
 async def _presence_heartbeat_forever(interval: int = 25) -> None:
-    """Periodically refresh presence so Supabase Realtime keeps the device online."""
+    """Refresh presence, failing the service if Realtime is no longer usable."""
+    failures = 0
     while True:
         await asyncio.sleep(interval)
         if state.channel is not None:
-            await publish_presence()
+            if await publish_presence():
+                failures = 0
+                continue
+            failures += 1
+            if failures >= PRESENCE_FAILURE_LIMIT:
+                raise ConnectionError(
+                    "Realtime presence failed "
+                    f"{failures} consecutive times; restarting listener"
+                )
+
+
+async def _realtime_watchdog_forever(client: AsyncRealtimeClient, interval: int = 5) -> None:
+    """Surface a failed Realtime background task to the systemd-supervised loop.
+
+    realtime 2.31 can throw ``ValueError('Set of Tasks/Futures is empty')``
+    while reconnecting after a dropped WebSocket.  That exception otherwise
+    remains detached from ``run_once()``, leaving a process that looks healthy
+    but no longer has a channel or presence.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        listen_task = client._listen_task
+        if listen_task is None or not listen_task.done():
+            continue
+        if listen_task.cancelled():
+            raise ConnectionError("Realtime listener task was cancelled")
+        exc = listen_task.exception()
+        if exc is not None:
+            raise ConnectionError("Realtime listener task crashed") from exc
+        raise ConnectionError("Realtime listener task stopped unexpectedly")
 
 
 async def _broadcast(event: str, payload: dict | None = None) -> None:
@@ -433,8 +474,13 @@ def _on_call_ended(_payload: dict) -> None:
     _end_call()
 
 
-async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) -> None:
-    """Re-login periodically; set_auth() re-authorizes the joined channel in place."""
+async def _renew_auth_before_expiry(expires_in: int) -> None:
+    """Get a fresh token, then let ``run_once`` rebuild the Realtime session.
+
+    Realtime 2.31 can still let a channel expire after ``set_auth()`` reports
+    success.  Rebuilding the websocket with the fresh token well before its
+    expiry is more reliable than changing credentials in place.
+    """
     while True:
         delay = min(2700, max(60, int(expires_in * 0.75)))
         await asyncio.sleep(delay)
@@ -446,10 +492,9 @@ async def _refresh_auth_forever(client: AsyncRealtimeClient, expires_in: int) ->
                 SUPABASE_DEVICE_EMAIL,
                 SUPABASE_DEVICE_PASSWORD,
             )
-            expires_in = int(auth.get("expires_in", 3600))
             state.access_token = auth["access_token"]
-            await client.set_auth(auth["access_token"])
-            logger.info("Auth token refreshed (next in ~%ss)", min(2700, int(expires_in * 0.75)))
+            logger.info("Auth token renewed; rebuilding Realtime session before expiry")
+            return
         except Exception:
             logger.exception("Token refresh failed, retrying in 60s")
             expires_in = 80
@@ -514,20 +559,37 @@ async def run_once() -> None:
         raise RuntimeError("channel subscribe failed or timed out")
 
     state.channel = channel
-    await publish_presence()
+    if not await publish_presence():
+        state.channel = None
+        await client.close()
+        raise ConnectionError("Initial Realtime presence publish failed")
     await sync_photos()
 
-    refresh_task = asyncio.create_task(
-        _refresh_auth_forever(client, int(auth.get("expires_in", 3600)))
-    )
+    refresh_task = asyncio.create_task(_renew_auth_before_expiry(int(auth.get("expires_in", 3600))))
     heartbeat_task = asyncio.create_task(_presence_heartbeat_forever(25))
+    watchdog_task = asyncio.create_task(_realtime_watchdog_forever(client))
 
     try:
-        await asyncio.Event().wait()
+        # The health tasks normally run forever.  A completed refresh task
+        # deliberately recycles the session with its new token; a failed task
+        # propagates and is retried by main().
+        done, pending = await asyncio.wait(
+            {refresh_task, heartbeat_task, watchdog_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            task.result()
     finally:
         refresh_task.cancel()
         heartbeat_task.cancel()
+        watchdog_task.cancel()
         state.channel = None
+        # The Realtime client owns background websocket tasks.  Stop them
+        # before retrying so a dead connection cannot leak into the next run.
+        for task in (client._listen_task, client._heartbeat_task):
+            if task is not None:
+                task.cancel()
+        await client.close()
 
 
 async def main() -> None:
