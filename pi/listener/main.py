@@ -73,7 +73,7 @@ SLIDESHOW_ENABLED = os.environ.get("SLIDESHOW_ENABLED", "true").lower() not in (
     "no",
 )
 PHOTOS_DIR = os.environ.get("PHOTOS_DIR", "/home/julienne/visio-tv/photos")
-SLIDESHOW_INTERVAL = float(os.environ.get("SLIDESHOW_INTERVAL", "8"))
+SLIDESHOW_INTERVAL = float(os.environ.get("SLIDESHOW_INTERVAL", "120"))
 # Outside this window the video signal is cut so the screen goes to standby.
 SLIDESHOW_START = os.environ.get("SLIDESHOW_START", "09:00")
 SLIDESHOW_END = os.environ.get("SLIDESHOW_END", "21:00")
